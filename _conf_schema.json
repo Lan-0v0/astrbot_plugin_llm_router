@@ -24,7 +24,7 @@
     "description": "路由规则",
     "type": "template_list",
     "default": [],
-    "hint": "先应用白名单绑定，再按优先级从高到低匹配；优先级相同时使用最靠前的条目。",
+    "hint": "先应用白名单绑定，再按优先级从高到低匹配；优先级相同时随机选择顺序。",
     "templates": {
       "route": {
         "name": "路由条目",
@@ -66,7 +66,7 @@
               "max": 100,
               "step": 1
             },
-            "hint": "优先级越高越先参与路由；相同优先级按条目在面板中的顺序处理。"
+            "hint": "优先级越高越先参与路由；相同优先级随机选择顺序。"
           },
           "content_types": {
             "description": "类型",
@@ -95,5 +95,20 @@
         }
       }
     }
+  },
+  "direct_route_without_match": {
+    "description": "无需匹配/判断直接路由",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，未设置规则词汇和类型的公共路由条目可作为所有消息的直接路由候选。规则匹配和 LLM 判断仍优先执行；多个直接路由条目按优先级选择，同优先级随机。"
+  },
+  "whitelist_direct_route": {
+    "description": "白名单直接路由",
+    "type": "bool",
+    "default": true,
+    "condition": {
+      "direct_route_without_match": true
+    },
+    "hint": "仅在“无需匹配/判断直接路由”开启时生效。命中白名单后，未设置规则词汇和类型的对应白名单条目可直接路由；多个条目按优先级选择，同优先级随机。"
   }
 }

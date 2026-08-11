@@ -1,12 +1,16 @@
 import json
+import random
 import unittest
 
 from router_core import (
+    DIRECT_ROUTE_METHOD,
     LLM_JUDGEMENT_METHOD,
     RULE_MATCH_METHOD,
+    WHITELIST_DIRECT_ROUTE_METHOD,
     IdentityContext,
     build_classifier_prompts,
     filter_eligible_routes,
+    find_direct_route_match,
     find_rule_match,
     migrate_route_entry_mappings,
     normalize_priority,
@@ -14,6 +18,11 @@ from router_core import (
     parse_judgement_methods,
     parse_route_entries,
 )
+
+
+class ReverseShuffleRandom(random.Random):
+    def shuffle(self, values: list) -> None:
+        values.reverse()
 
 
 def make_route_entry(
@@ -74,19 +83,24 @@ class RuleRoutingTests(unittest.TestCase):
         assert route_match is not None
         self.assertEqual(route_match.route_entry.name, "higher")
 
-    def test_first_matching_route_wins(self) -> None:
+    def test_rule_match_uses_randomized_equal_priority_order(self) -> None:
         route_entries = parse_route_entries(
             [
                 make_route_entry("first", rule_keywords=["方程"]),
                 make_route_entry("second", rule_keywords=["方程"]),
             ]
         )
+        eligible_routes = filter_eligible_routes(
+            route_entries,
+            IdentityContext(),
+            random_generator=ReverseShuffleRandom(),
+        )
 
-        route_match = find_rule_match("请帮我解这个方程", route_entries)
+        route_match = find_rule_match("请帮我解这个方程", eligible_routes)
 
         self.assertIsNotNone(route_match)
         assert route_match is not None
-        self.assertEqual(route_match.route_entry.name, "first")
+        self.assertEqual(route_match.route_entry.name, "second")
         self.assertEqual(route_match.matched_value, "方程")
 
     def test_english_rule_matching_is_case_insensitive(self) -> None:
@@ -178,7 +192,7 @@ class AccessListTests(unittest.TestCase):
             ["higher", "lower"],
         )
 
-    def test_equal_priorities_preserve_panel_order(self) -> None:
+    def test_equal_priorities_are_randomized(self) -> None:
         route_entries = parse_route_entries(
             [
                 make_route_entry("first", priority=50),
@@ -186,11 +200,15 @@ class AccessListTests(unittest.TestCase):
             ]
         )
 
-        eligible_routes = filter_eligible_routes(route_entries, IdentityContext())
+        eligible_routes = filter_eligible_routes(
+            route_entries,
+            IdentityContext(),
+            random_generator=ReverseShuffleRandom(),
+        )
 
         self.assertEqual(
             [route.name for route in eligible_routes],
-            ["first", "second"],
+            ["second", "first"],
         )
 
     def test_name_matching_requires_explicit_prefix(self) -> None:
@@ -256,6 +274,92 @@ class LLMClassificationTests(unittest.TestCase):
         )
         self.assertEqual(parsed_user_prompt["candidate_routes"][0]["priority"], 100)
         self.assertIn("priority 数值最大的候选", system_prompt)
+        self.assertIn("候选列表顺序已经随机化", system_prompt)
+
+    def test_equal_priority_classifier_catalog_uses_randomized_order(self) -> None:
+        eligible_routes = filter_eligible_routes(
+            self.route_entries,
+            IdentityContext(),
+            random_generator=ReverseShuffleRandom(),
+        )
+
+        _, user_prompt = build_classifier_prompts("测试消息", eligible_routes)
+        candidate_routes = json.loads(user_prompt)["candidate_routes"]
+
+        self.assertEqual(
+            [candidate["route_id"] for candidate in candidate_routes],
+            ["route_1", "route_0"],
+        )
+
+
+class DirectRoutingTests(unittest.TestCase):
+    def test_public_route_without_conditions_is_direct_candidate(self) -> None:
+        route_entries = parse_route_entries([make_route_entry("direct")])
+
+        route_match = find_direct_route_match(
+            route_entries,
+            whitelist_only=False,
+        )
+
+        self.assertIsNotNone(route_match)
+        assert route_match is not None
+        self.assertEqual(route_match.route_entry.name, "direct")
+        self.assertEqual(route_match.judgement_method, DIRECT_ROUTE_METHOD)
+
+    def test_route_with_any_matching_condition_is_not_direct_candidate(self) -> None:
+        route_entries = parse_route_entries(
+            [
+                make_route_entry("rule", rule_keywords=["方程"]),
+                make_route_entry("type", content_types=["数学问题"]),
+            ]
+        )
+
+        route_match = find_direct_route_match(
+            route_entries,
+            whitelist_only=False,
+        )
+
+        self.assertIsNone(route_match)
+
+    def test_whitelist_direct_route_requires_whitelist_candidate(self) -> None:
+        route_entries = parse_route_entries(
+            [
+                make_route_entry("public"),
+                make_route_entry("bound", whitelist=["user:10001"]),
+            ]
+        )
+
+        route_match = find_direct_route_match(
+            route_entries,
+            whitelist_only=True,
+        )
+
+        self.assertIsNotNone(route_match)
+        assert route_match is not None
+        self.assertEqual(route_match.route_entry.name, "bound")
+        self.assertEqual(
+            route_match.judgement_method,
+            WHITELIST_DIRECT_ROUTE_METHOD,
+        )
+
+    def test_direct_routes_use_priority_before_random_tie_breaking(self) -> None:
+        route_entries = parse_route_entries(
+            [
+                make_route_entry("lower", priority=20),
+                make_route_entry("first high", priority=80),
+                make_route_entry("second high", priority=80),
+            ]
+        )
+
+        route_match = find_direct_route_match(
+            route_entries,
+            whitelist_only=False,
+            random_generator=ReverseShuffleRandom(),
+        )
+
+        self.assertIsNotNone(route_match)
+        assert route_match is not None
+        self.assertEqual(route_match.route_entry.name, "second high")
 
 
 class RouteParsingTests(unittest.TestCase):

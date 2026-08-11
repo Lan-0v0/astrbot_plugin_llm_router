@@ -351,6 +351,170 @@ class PluginRoutingRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(event.stopped)
         self.assertEqual(event.sent_results, [])
 
+    async def test_public_empty_route_directs_without_judgement_methods(
+        self,
+    ) -> None:
+        context = FakeContext({"direct-provider": "direct response"})
+        config = {
+            "judgement_methods": [],
+            "routing_models": [
+                make_route_entry(
+                    rule_keywords=[],
+                    content_types=[],
+                    route_provider="direct-provider",
+                )
+            ],
+        }
+        plugin = LLMRouterPlugin(context, config)
+        event = FakeEvent()
+
+        await plugin.route_llm_request(event, make_provider_request("任意消息"))
+
+        self.assertEqual(
+            [call["chat_provider_id"] for call in context.llm_calls],
+            ["direct-provider"],
+        )
+        self.assertTrue(event.stopped)
+
+    async def test_disabling_direct_routing_keeps_empty_route_inactive(self) -> None:
+        context = FakeContext({"direct-provider": "direct response"})
+        config = {
+            "judgement_methods": [],
+            "direct_route_without_match": False,
+            "routing_models": [
+                make_route_entry(
+                    rule_keywords=[],
+                    content_types=[],
+                    route_provider="direct-provider",
+                )
+            ],
+        }
+        plugin = LLMRouterPlugin(context, config)
+        event = FakeEvent()
+
+        await plugin.route_llm_request(event, make_provider_request("任意消息"))
+
+        self.assertEqual(context.llm_calls, [])
+        self.assertFalse(event.stopped)
+
+    async def test_whitelist_empty_route_directs_for_matching_user(self) -> None:
+        context = FakeContext({"bound-provider": "bound response"})
+        config = {
+            "judgement_methods": [],
+            "routing_models": [
+                make_route_entry(
+                    rule_keywords=[],
+                    content_types=[],
+                    route_provider="bound-provider",
+                    whitelist=["user:10001"],
+                )
+            ],
+        }
+        plugin = LLMRouterPlugin(context, config)
+        event = FakeEvent()
+
+        await plugin.route_llm_request(event, make_provider_request("任意消息"))
+
+        self.assertEqual(
+            [call["chat_provider_id"] for call in context.llm_calls],
+            ["bound-provider"],
+        )
+
+    async def test_whitelist_direct_switch_can_disable_bound_empty_route(
+        self,
+    ) -> None:
+        context = FakeContext(
+            {
+                "public-provider": "public response",
+                "bound-provider": "bound response",
+            }
+        )
+        config = {
+            "judgement_methods": [],
+            "direct_route_without_match": True,
+            "whitelist_direct_route": False,
+            "routing_models": [
+                make_route_entry(
+                    rule_keywords=[],
+                    content_types=[],
+                    route_provider="public-provider",
+                    priority=100,
+                ),
+                make_route_entry(
+                    rule_keywords=[],
+                    content_types=[],
+                    route_provider="bound-provider",
+                    whitelist=["user:10001"],
+                ),
+            ],
+        }
+        plugin = LLMRouterPlugin(context, config)
+        event = FakeEvent()
+
+        await plugin.route_llm_request(event, make_provider_request("任意消息"))
+
+        self.assertEqual(context.llm_calls, [])
+        self.assertFalse(event.stopped)
+
+    async def test_master_direct_switch_overrides_enabled_whitelist_switch(
+        self,
+    ) -> None:
+        context = FakeContext({"bound-provider": "bound response"})
+        config = {
+            "judgement_methods": [],
+            "direct_route_without_match": False,
+            "whitelist_direct_route": True,
+            "routing_models": [
+                make_route_entry(
+                    rule_keywords=[],
+                    content_types=[],
+                    route_provider="bound-provider",
+                    whitelist=["user:10001"],
+                )
+            ],
+        }
+        plugin = LLMRouterPlugin(context, config)
+        event = FakeEvent()
+
+        await plugin.route_llm_request(event, make_provider_request("任意消息"))
+
+        self.assertEqual(context.llm_calls, [])
+        self.assertFalse(event.stopped)
+
+    async def test_rule_match_runs_before_empty_direct_route(self) -> None:
+        context = FakeContext(
+            {
+                "rule-provider": "rule response",
+                "direct-provider": "direct response",
+            }
+        )
+        config = {
+            "judgement_methods": ["规则匹配"],
+            "routing_models": [
+                make_route_entry(
+                    rule_keywords=[],
+                    content_types=[],
+                    route_provider="direct-provider",
+                    priority=100,
+                ),
+                make_route_entry(
+                    rule_keywords=["方程"],
+                    content_types=[],
+                    route_provider="rule-provider",
+                    priority=10,
+                ),
+            ],
+        }
+        plugin = LLMRouterPlugin(context, config)
+        event = FakeEvent()
+
+        await plugin.route_llm_request(event, make_provider_request("解方程"))
+
+        self.assertEqual(
+            [call["chat_provider_id"] for call in context.llm_calls],
+            ["rule-provider"],
+        )
+
     async def test_llm_classification_checks_priority_groups_in_order(self) -> None:
         context = FakeContext(
             {

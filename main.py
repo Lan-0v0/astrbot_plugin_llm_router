@@ -22,6 +22,7 @@ try:
         RouteMatch,
         build_classifier_prompts,
         filter_eligible_routes,
+        find_direct_route_match,
         find_rule_match,
         migrate_route_entry_mappings,
         parse_classification_route_id,
@@ -39,6 +40,7 @@ except (
         RouteMatch,
         build_classifier_prompts,
         filter_eligible_routes,
+        find_direct_route_match,
         find_rule_match,
         migrate_route_entry_mappings,
         parse_classification_route_id,
@@ -51,7 +53,7 @@ except (
     "astrbot_plugin_llm_router",
     "Lan-0v0",
     "按规则或 LLM 类型判断将消息路由到指定模型，并支持白名单与黑名单。",
-    "0.0.4",
+    "0.0.5",
 )
 class LLMRouterPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
@@ -94,7 +96,13 @@ class LLMRouterPlugin(Star):
         judgement_methods = parse_judgement_methods(
             self.config.get("judgement_methods")
         )
-        if not judgement_methods:
+        direct_routing_enabled = bool(
+            self.config.get("direct_route_without_match", True)
+        )
+        whitelist_direct_routing_enabled = direct_routing_enabled and bool(
+            self.config.get("whitelist_direct_route", True)
+        )
+        if not judgement_methods and not direct_routing_enabled:
             return
 
         route_entries = parse_route_entries(self.config.get("routing_models", []))
@@ -109,6 +117,21 @@ class LLMRouterPlugin(Star):
 
         if route_match is None and LLM_JUDGEMENT_METHOD in judgement_methods:
             route_match = await self._find_llm_match(message_text, eligible_routes)
+
+        if route_match is None and direct_routing_enabled:
+            whitelist_is_bound = any(
+                route_entry.whitelist for route_entry in eligible_routes
+            )
+            if whitelist_is_bound and whitelist_direct_routing_enabled:
+                route_match = find_direct_route_match(
+                    eligible_routes,
+                    whitelist_only=True,
+                )
+            elif not whitelist_is_bound:
+                route_match = find_direct_route_match(
+                    eligible_routes,
+                    whitelist_only=False,
+                )
 
         if route_match is None:
             return

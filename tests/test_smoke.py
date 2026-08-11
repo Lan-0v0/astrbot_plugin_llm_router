@@ -18,6 +18,16 @@ class PluginSmokeTests(unittest.TestCase):
             schema["judgement_methods"]["default"],
             ["规则匹配", "LLM判断"],
         )
+        self.assertEqual(schema["direct_route_without_match"]["default"], True)
+        self.assertEqual(schema["whitelist_direct_route"]["default"], True)
+        self.assertEqual(
+            schema["whitelist_direct_route"]["condition"],
+            {"direct_route_without_match": True},
+        )
+        self.assertEqual(
+            list(schema)[-2:],
+            ["direct_route_without_match", "whitelist_direct_route"],
+        )
         self.assertEqual(
             set(schema["routing_models"]["templates"]),
             {"route"},
@@ -102,9 +112,9 @@ class PluginSmokeTests(unittest.TestCase):
 
         self.assertIsNotNone(metadata_version_match)
         assert metadata_version_match is not None
-        self.assertEqual(metadata_version_match.group(1), "v0.0.4")
-        self.assertIn('"0.0.4",', main_text)
-        self.assertIn("## [v0.0.4]", changelog_text)
+        self.assertEqual(metadata_version_match.group(1), "v0.0.5")
+        self.assertIn('"0.0.5",', main_text)
+        self.assertIn("## [v0.0.5]", changelog_text)
 
     def test_metadata_contains_public_repository_information(self) -> None:
         metadata_text = (PROJECT_ROOT / "metadata.yaml").read_text(encoding="utf-8")

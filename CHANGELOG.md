@@ -2,6 +2,19 @@
 
 本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.0.5] - 2026-08-12
+
+### 新增
+
+- 配置面板底部新增“无需匹配/判断直接路由”开关，默认开启；未设置规则词汇和类型的公共条目可接管所有未被规则或 LLM 命中的消息。
+- 主开关开启时显示“白名单直接路由”开关，默认开启；命中白名单且没有匹配条件的绑定条目可直接路由。
+- 即使未启用规则匹配和 LLM 判断，只要对应直接路由开关有效，空条件条目仍可完成路由。
+
+### 变更
+
+- 所有涉及优先级的路由顺序均改为高优先级优先、同优先级随机，不再按面板顺序固定决胜。
+- 规则匹配和 LLM 判断保持在直接路由之前执行；直接路由只作为空条件条目的兜底路径。
+
 ## [v0.0.4] - 2026-08-12
 
 ### 变更
@@ -50,6 +63,7 @@
 - 支持将成功的路由回复写回 AstrBot 会话历史。
 - 增加 AstrBot WebUI 配置 Schema、使用文档、测试和 GitHub 发布工作流。
 
+[v0.0.5]: https://github.com/Lan-0v0/astrbot_plugin_llm_router/releases/tag/v0.0.5
 [v0.0.4]: https://github.com/Lan-0v0/astrbot_plugin_llm_router/releases/tag/v0.0.4
 [v0.0.3]: https://github.com/Lan-0v0/astrbot_plugin_llm_router/releases/tag/v0.0.3
 [v0.0.2]: https://github.com/Lan-0v0/astrbot_plugin_llm_router/releases/tag/v0.0.2
