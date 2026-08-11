@@ -1,10 +1,9 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - "v*"
-  workflow_dispatch:
+  release:
+    types:
+      - published
 
 permissions:
   contents: write
@@ -12,6 +11,8 @@ permissions:
 jobs:
   package:
     runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name || github.ref_name }}
 
     steps:
       - name: Checkout repository
@@ -33,10 +34,9 @@ jobs:
       - name: Validate release version
         shell: bash
         run: |
-          TAG_NAME="${GITHUB_REF_NAME}"
           METADATA_VERSION="$(python -c 'import yaml; print(yaml.safe_load(open("metadata.yaml", encoding="utf-8"))["version"])')"
-          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${METADATA_VERSION}" != "${TAG_NAME}" ]]; then
-            echo "metadata.yaml version ${METADATA_VERSION} does not match tag ${TAG_NAME}."
+          if [[ -n "${RELEASE_TAG}" && "${METADATA_VERSION}" != "${RELEASE_TAG}" ]]; then
+            echo "metadata.yaml version ${METADATA_VERSION} does not match release ${RELEASE_TAG}."
             exit 1
           fi
 
@@ -50,7 +50,7 @@ jobs:
       - name: Build AstrBot plugin archive
         shell: bash
         run: |
-          ARCHIVE_NAME="astrbot_plugin_llm_router-${GITHUB_REF_NAME}.zip"
+          ARCHIVE_NAME="astrbot_plugin_llm_router-${RELEASE_TAG}.zip"
           git archive --format=zip --prefix=astrbot_plugin_llm_router/ -o "${ARCHIVE_NAME}" HEAD
           ARCHIVE_SIZE="$(stat -c%s "${ARCHIVE_NAME}")"
           if (( ARCHIVE_SIZE > 16777216 )); then
@@ -61,7 +61,7 @@ jobs:
 
       - name: Upload release archive
         uses: softprops/action-gh-release@v2
-        if: github.ref_type == 'tag'
+        if: github.event_name == 'release'
         with:
           files: ${{ env.ARCHIVE_NAME }}
           generate_release_notes: false
