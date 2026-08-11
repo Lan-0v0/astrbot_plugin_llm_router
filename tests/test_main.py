@@ -99,23 +99,38 @@ class FakeConversationManager:
         self.saved_pairs.append(kwargs)
 
 
+class FakePersonaManager:
+    def __init__(self, persona_prompts: dict[str, str] | None = None) -> None:
+        self.personas_v3 = [
+            {"name": persona_id, "prompt": persona_prompt}
+            for persona_id, persona_prompt in (persona_prompts or {}).items()
+        ]
+
+
 class FakeContext:
     def __init__(
         self,
-        provider_responses: dict[str, str],
+        provider_responses: dict[str, str | list[str]],
         provider_errors: dict[str, Exception] | None = None,
+        persona_prompts: dict[str, str] | None = None,
     ) -> None:
         self.provider_responses = provider_responses
         self.provider_errors = provider_errors or {}
         self.llm_calls: list[dict[str, Any]] = []
         self.conversation_manager = FakeConversationManager()
+        self.persona_manager = FakePersonaManager(persona_prompts)
 
     async def llm_generate(self, **kwargs: Any) -> FakeLLMResponse:
         self.llm_calls.append(kwargs)
         provider_id = str(kwargs["chat_provider_id"])
         if provider_id in self.provider_errors:
             raise self.provider_errors[provider_id]
-        return FakeLLMResponse(self.provider_responses.get(provider_id, ""))
+        configured_response = self.provider_responses.get(provider_id, "")
+        if isinstance(configured_response, list):
+            response_text = configured_response.pop(0) if configured_response else ""
+        else:
+            response_text = configured_response
+        return FakeLLMResponse(response_text)
 
 
 class FakeConfig(dict):
@@ -169,15 +184,20 @@ def make_route_entry(
     rule_keywords: list[str],
     content_types: list[str],
     route_provider: str = "route-provider",
+    route_persona: str = "",
+    priority: int = 100,
+    whitelist: list[str] | None = None,
 ) -> dict[str, Any]:
     return {
         "__template_key": "route",
         "name": "math route",
         "enabled": True,
         "route_provider": route_provider,
+        "route_persona": route_persona,
+        "priority": priority,
         "content_types": content_types,
         "rule_keywords": rule_keywords,
-        "whitelist": [],
+        "whitelist": whitelist or [],
         "blacklist": [],
     }
 
@@ -204,7 +224,154 @@ class PluginRoutingRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config.save_count, 1)
         self.assertEqual(config["routing_models"][0]["__template_key"], "route")
         self.assertEqual(config["routing_models"][0]["route_provider"], "")
+        self.assertEqual(config["routing_models"][0]["route_persona"], "")
+        self.assertEqual(config["routing_models"][0]["priority"], 100)
         self.assertNotIn("api_keys", config["routing_models"][0])
+
+    async def test_whitelist_binding_excludes_higher_priority_public_route(
+        self,
+    ) -> None:
+        context = FakeContext(
+            {
+                "public-provider": "public response",
+                "bound-provider": "bound response",
+            }
+        )
+        config = {
+            "judgement_methods": ["规则匹配"],
+            "routing_models": [
+                make_route_entry(
+                    rule_keywords=["方程"],
+                    content_types=[],
+                    route_provider="public-provider",
+                    priority=100,
+                ),
+                make_route_entry(
+                    rule_keywords=["方程"],
+                    content_types=[],
+                    route_provider="bound-provider",
+                    priority=10,
+                    whitelist=["user:10001"],
+                ),
+            ],
+        }
+        plugin = LLMRouterPlugin(context, config)
+        event = FakeEvent()
+
+        await plugin.route_llm_request(event, make_provider_request("解方程"))
+
+        self.assertEqual(
+            [call["chat_provider_id"] for call in context.llm_calls],
+            ["bound-provider"],
+        )
+        self.assertEqual(event.sent_results, [{"text": "bound response"}])
+
+    async def test_multiple_whitelist_bindings_use_highest_priority_route(
+        self,
+    ) -> None:
+        context = FakeContext(
+            {
+                "lower-provider": "lower response",
+                "higher-provider": "higher response",
+            }
+        )
+        config = {
+            "judgement_methods": ["规则匹配"],
+            "routing_models": [
+                make_route_entry(
+                    rule_keywords=["方程"],
+                    content_types=[],
+                    route_provider="lower-provider",
+                    priority=20,
+                    whitelist=["user:10001"],
+                ),
+                make_route_entry(
+                    rule_keywords=["方程"],
+                    content_types=[],
+                    route_provider="higher-provider",
+                    priority=80,
+                    whitelist=["user:10001"],
+                ),
+            ],
+        }
+        plugin = LLMRouterPlugin(context, config)
+        event = FakeEvent()
+
+        await plugin.route_llm_request(event, make_provider_request("解方程"))
+
+        self.assertEqual(
+            [call["chat_provider_id"] for call in context.llm_calls],
+            ["higher-provider"],
+        )
+
+    async def test_bound_route_miss_does_not_fall_through_to_public_route(
+        self,
+    ) -> None:
+        context = FakeContext({"public-provider": "public response"})
+        config = {
+            "judgement_methods": ["规则匹配"],
+            "routing_models": [
+                make_route_entry(
+                    rule_keywords=["方程"],
+                    content_types=[],
+                    route_provider="public-provider",
+                    priority=100,
+                ),
+                make_route_entry(
+                    rule_keywords=["你好"],
+                    content_types=[],
+                    route_provider="bound-provider",
+                    priority=10,
+                    whitelist=["user:10001"],
+                ),
+            ],
+        }
+        plugin = LLMRouterPlugin(context, config)
+        event = FakeEvent()
+
+        await plugin.route_llm_request(event, make_provider_request("解方程"))
+
+        self.assertEqual(context.llm_calls, [])
+        self.assertFalse(event.stopped)
+        self.assertEqual(event.sent_results, [])
+
+    async def test_llm_classification_checks_priority_groups_in_order(self) -> None:
+        context = FakeContext(
+            {
+                "classifier-provider": [
+                    '{"route_id":null,"matched_type":null}',
+                    '{"route_id":"route_0","matched_type":"数学问题"}',
+                ],
+                "lower-provider": "lower response",
+            }
+        )
+        config = {
+            "judgement_methods": ["LLM判断"],
+            "type_judgement_provider": "classifier-provider",
+            "routing_models": [
+                make_route_entry(
+                    rule_keywords=[],
+                    content_types=["数学问题"],
+                    route_provider="lower-provider",
+                    priority=20,
+                ),
+                make_route_entry(
+                    rule_keywords=[],
+                    content_types=["问候"],
+                    route_provider="higher-provider",
+                    priority=80,
+                ),
+            ],
+        }
+        plugin = LLMRouterPlugin(context, config)
+        event = FakeEvent()
+
+        await plugin.route_llm_request(event, make_provider_request("证明勾股定理"))
+
+        self.assertEqual(
+            [call["chat_provider_id"] for call in context.llm_calls],
+            ["classifier-provider", "classifier-provider", "lower-provider"],
+        )
 
     async def test_rule_match_skips_classifier_and_calls_selected_provider(
         self,
@@ -236,12 +403,121 @@ class PluginRoutingRegressionTests(unittest.IsolatedAsyncioTestCase):
         )
         routed_call = context.llm_calls[0]
         self.assertEqual(routed_call["contexts"][0]["content"], "previous question")
+        self.assertEqual(routed_call["system_prompt"], "system prompt")
         self.assertEqual(
             routed_call["extra_user_content_parts"][0]["text"], "dynamic context"
         )
         self.assertTrue(event.stopped)
         self.assertEqual(event.sent_results, [{"text": "routed response"}])
         self.assertEqual(len(context.conversation_manager.saved_pairs), 1)
+
+    async def test_selected_persona_overrides_routed_model_system_prompt(
+        self,
+    ) -> None:
+        context = FakeContext(
+            {"route-provider": "routed response"},
+            persona_prompts={"math-expert": "You are a precise math expert."},
+        )
+        config = {
+            "judgement_methods": ["规则匹配"],
+            "routing_models": [
+                make_route_entry(
+                    rule_keywords=["方程"],
+                    content_types=[],
+                    route_persona="math-expert",
+                )
+            ],
+        }
+        plugin = LLMRouterPlugin(context, config)
+        event = FakeEvent()
+
+        await plugin.route_llm_request(event, make_provider_request("解这个方程"))
+
+        self.assertEqual(len(context.llm_calls), 1)
+        self.assertEqual(
+            context.llm_calls[0]["system_prompt"],
+            "You are a precise math expert.",
+        )
+
+    async def test_default_persona_selection_follows_current_system_prompt(
+        self,
+    ) -> None:
+        context = FakeContext({"route-provider": "routed response"})
+        config = {
+            "judgement_methods": ["规则匹配"],
+            "routing_models": [
+                make_route_entry(
+                    rule_keywords=["方程"],
+                    content_types=[],
+                    route_persona="default",
+                )
+            ],
+        }
+        plugin = LLMRouterPlugin(context, config)
+        event = FakeEvent()
+
+        await plugin.route_llm_request(event, make_provider_request("解这个方程"))
+
+        self.assertEqual(context.llm_calls[0]["system_prompt"], "system prompt")
+
+    async def test_selected_persona_does_not_override_classifier_prompt(
+        self,
+    ) -> None:
+        context = FakeContext(
+            {
+                "classifier-provider": (
+                    '{"route_id":"route_0","matched_type":"数学问题"}'
+                ),
+                "route-provider": "routed response",
+            },
+            persona_prompts={"math-expert": "You are a precise math expert."},
+        )
+        config = {
+            "judgement_methods": ["LLM判断"],
+            "type_judgement_provider": "classifier-provider",
+            "routing_models": [
+                make_route_entry(
+                    rule_keywords=[],
+                    content_types=["数学问题"],
+                    route_persona="math-expert",
+                )
+            ],
+        }
+        plugin = LLMRouterPlugin(context, config)
+        event = FakeEvent()
+
+        await plugin.route_llm_request(event, make_provider_request("证明勾股定理"))
+
+        self.assertEqual(len(context.llm_calls), 2)
+        self.assertIn(
+            "消息类型路由分类器",
+            context.llm_calls[0]["system_prompt"],
+        )
+        self.assertEqual(
+            context.llm_calls[1]["system_prompt"],
+            "You are a precise math expert.",
+        )
+
+    async def test_missing_selected_persona_preserves_current_system_prompt(
+        self,
+    ) -> None:
+        context = FakeContext({"route-provider": "routed response"})
+        config = {
+            "judgement_methods": ["规则匹配"],
+            "routing_models": [
+                make_route_entry(
+                    rule_keywords=["方程"],
+                    content_types=[],
+                    route_persona="deleted-persona",
+                )
+            ],
+        }
+        plugin = LLMRouterPlugin(context, config)
+        event = FakeEvent()
+
+        await plugin.route_llm_request(event, make_provider_request("解这个方程"))
+
+        self.assertEqual(context.llm_calls[0]["system_prompt"], "system prompt")
 
     async def test_llm_classification_runs_after_rule_miss(self) -> None:
         context = FakeContext(

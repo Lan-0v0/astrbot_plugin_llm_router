@@ -9,6 +9,7 @@ from router_core import (
     filter_eligible_routes,
     find_rule_match,
     migrate_route_entry_mappings,
+    normalize_priority,
     parse_classification_route_id,
     parse_judgement_methods,
     parse_route_entries,
@@ -23,12 +24,16 @@ def make_route_entry(
     whitelist: list[str] | None = None,
     blacklist: list[str] | None = None,
     route_provider: str = "selected-provider",
+    route_persona: str = "",
+    priority: int = 100,
 ) -> dict:
     return {
         "__template_key": "route",
         "name": name,
         "enabled": True,
         "route_provider": route_provider,
+        "route_persona": route_persona,
+        "priority": priority,
         "content_types": content_types or [],
         "rule_keywords": rule_keywords or [],
         "whitelist": whitelist or [],
@@ -54,6 +59,21 @@ class JudgementMethodTests(unittest.TestCase):
 
 
 class RuleRoutingTests(unittest.TestCase):
+    def test_higher_priority_rule_match_wins_even_when_listed_later(self) -> None:
+        route_entries = parse_route_entries(
+            [
+                make_route_entry("lower", rule_keywords=["方程"], priority=10),
+                make_route_entry("higher", rule_keywords=["方程"], priority=90),
+            ]
+        )
+        eligible_routes = filter_eligible_routes(route_entries, IdentityContext())
+
+        route_match = find_rule_match("请帮我解这个方程", eligible_routes)
+
+        self.assertIsNotNone(route_match)
+        assert route_match is not None
+        self.assertEqual(route_match.route_entry.name, "higher")
+
     def test_first_matching_route_wins(self) -> None:
         route_entries = parse_route_entries(
             [
@@ -112,6 +132,66 @@ class AccessListTests(unittest.TestCase):
 
         self.assertEqual(denied_routes, ())
         self.assertEqual(len(allowed_routes), 1)
+
+    def test_whitelist_match_binds_user_and_excludes_public_routes(self) -> None:
+        route_entries = parse_route_entries(
+            [
+                make_route_entry("public", priority=100),
+                make_route_entry(
+                    "bound",
+                    whitelist=["user:10001"],
+                    priority=10,
+                ),
+            ]
+        )
+
+        eligible_routes = filter_eligible_routes(
+            route_entries,
+            IdentityContext(user_id="10001"),
+        )
+
+        self.assertEqual([route.name for route in eligible_routes], ["bound"])
+
+    def test_multiple_matching_whitelists_are_sorted_by_priority(self) -> None:
+        route_entries = parse_route_entries(
+            [
+                make_route_entry(
+                    "lower",
+                    whitelist=["user:10001"],
+                    priority=20,
+                ),
+                make_route_entry(
+                    "higher",
+                    whitelist=["user:10001"],
+                    priority=80,
+                ),
+            ]
+        )
+
+        eligible_routes = filter_eligible_routes(
+            route_entries,
+            IdentityContext(user_id="10001"),
+        )
+
+        self.assertEqual(
+            [route.name for route in eligible_routes],
+            ["higher", "lower"],
+        )
+
+    def test_equal_priorities_preserve_panel_order(self) -> None:
+        route_entries = parse_route_entries(
+            [
+                make_route_entry("first", priority=50),
+                make_route_entry("second", priority=50),
+            ]
+        )
+
+        eligible_routes = filter_eligible_routes(route_entries, IdentityContext())
+
+        self.assertEqual(
+            [route.name for route in eligible_routes],
+            ["first", "second"],
+        )
 
     def test_name_matching_requires_explicit_prefix(self) -> None:
         route_entries = parse_route_entries(
@@ -174,9 +254,39 @@ class LLMClassificationTests(unittest.TestCase):
             parsed_user_prompt["candidate_routes"][1]["types"],
             ["历史问题"],
         )
+        self.assertEqual(parsed_user_prompt["candidate_routes"][0]["priority"], 100)
+        self.assertIn("priority 数值最大的候选", system_prompt)
 
 
 class RouteParsingTests(unittest.TestCase):
+    def test_priority_is_clamped_to_supported_range(self) -> None:
+        self.assertEqual(normalize_priority(101), 100)
+        self.assertEqual(normalize_priority(-1), 0)
+        self.assertEqual(normalize_priority("75"), 75)
+        self.assertEqual(normalize_priority("invalid"), 100)
+
+    def test_migration_normalizes_existing_priority(self) -> None:
+        current_entry = make_route_entry("invalid priority")
+        current_entry["priority"] = 999
+
+        migrated_entries, configuration_changed = migrate_route_entry_mappings(
+            [current_entry]
+        )
+
+        self.assertTrue(configuration_changed)
+        self.assertEqual(migrated_entries[0]["priority"], 100)
+
+    def test_migration_adds_persona_default_to_existing_route(self) -> None:
+        current_entry = make_route_entry("v0.0.2 route")
+        del current_entry["route_persona"]
+
+        migrated_entries, configuration_changed = migrate_route_entry_mappings(
+            [current_entry]
+        )
+
+        self.assertTrue(configuration_changed)
+        self.assertEqual(migrated_entries[0]["route_persona"], "")
+
     def test_legacy_route_migration_removes_credentials(self) -> None:
         migrated_entries, configuration_changed = migrate_route_entry_mappings(
             [
@@ -196,6 +306,8 @@ class RouteParsingTests(unittest.TestCase):
         self.assertTrue(configuration_changed)
         self.assertEqual(migrated_entries[0]["__template_key"], "route")
         self.assertEqual(migrated_entries[0]["route_provider"], "")
+        self.assertEqual(migrated_entries[0]["route_persona"], "")
+        self.assertEqual(migrated_entries[0]["priority"], 100)
         self.assertNotIn("api_base_url", migrated_entries[0])
         self.assertNotIn("api_keys", migrated_entries[0])
         self.assertNotIn("model", migrated_entries[0])
@@ -214,6 +326,13 @@ class RouteParsingTests(unittest.TestCase):
         route_entries = parse_route_entries([make_route_entry("selected")])
 
         self.assertEqual(route_entries[0].provider_id, "selected-provider")
+
+    def test_selected_astrbot_persona_is_parsed(self) -> None:
+        route_entries = parse_route_entries(
+            [make_route_entry("selected", route_persona="math-expert")]
+        )
+
+        self.assertEqual(route_entries[0].persona_id, "math-expert")
 
     def test_route_without_selected_provider_is_not_eligible(self) -> None:
         route_entries = parse_route_entries(

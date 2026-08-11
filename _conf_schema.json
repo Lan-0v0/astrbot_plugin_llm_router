@@ -24,7 +24,7 @@
     "description": "路由规则",
     "type": "template_list",
     "default": [],
-    "hint": "按列表顺序匹配；若多个条目同时命中，使用最靠前的可用条目。",
+    "hint": "先应用白名单绑定，再按优先级从高到低匹配；优先级相同时使用最靠前的条目。",
     "templates": {
       "route": {
         "name": "路由条目",
@@ -50,6 +50,24 @@
             "_special": "select_provider",
             "hint": "选择一个已在 AstrBot 中配置的聊天模型提供商。模型地址、密钥和模型名称均由 AstrBot 统一管理。"
           },
+          "route_persona": {
+            "description": "人格设定",
+            "type": "string",
+            "default": "",
+            "_special": "select_persona",
+            "hint": "未选择或选择默认人格时，沿用当前 AstrBot 请求的人格设定；选择其他 AstrBot 人格时，仅为此路由模型覆盖系统提示词。"
+          },
+          "priority": {
+            "description": "优先级",
+            "type": "int",
+            "default": 100,
+            "slider": {
+              "min": 0,
+              "max": 100,
+              "step": 1
+            },
+            "hint": "优先级越高越先参与路由；相同优先级按条目在面板中的顺序处理。"
+          },
           "content_types": {
             "description": "类型",
             "type": "list",
@@ -66,7 +84,7 @@
             "description": "白名单",
             "type": "list",
             "default": [],
-            "hint": "留空不启用。支持直接填写用户/群/会话 ID，或 user:、group:、session:、umo:、name:、platform: 前缀。"
+            "hint": "留空不启用。命中任一白名单条目后，当前用户只会在所有命中的白名单条目中按优先级路由，公共条目将被排除。支持直接填写用户/群/会话 ID，或 user:、group:、session:、umo:、name:、platform: 前缀。"
           },
           "blacklist": {
             "description": "黑名单",

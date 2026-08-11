@@ -2,6 +2,19 @@
 
 本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.0.3] - 2026-08-12
+
+### 新增
+
+- 路由条目新增 AstrBot 人格选择；留空或选择默认人格时沿用当前请求的人格，选择其他人格时仅覆盖命中路由模型的系统提示词。
+- 路由条目新增 0～100 优先级配置，默认值为 100。
+- 规则匹配和 LLM 判断均按优先级从高到低执行，同优先级保持面板顺序。
+
+### 变更
+
+- 白名单改为绑定语义：命中白名单后只在所有命中的白名单条目中路由，公共条目不再参与。
+- 同一用户命中多个白名单条目时，按照优先级决定路由顺序。
+
 ## [v0.0.2] - 2026-08-12
 
 ### 变更
@@ -30,5 +43,6 @@
 - 支持将成功的路由回复写回 AstrBot 会话历史。
 - 增加 AstrBot WebUI 配置 Schema、使用文档、测试和 GitHub 发布工作流。
 
+[v0.0.3]: https://github.com/Lan-0v0/astrbot_plugin_llm_router/releases/tag/v0.0.3
 [v0.0.2]: https://github.com/Lan-0v0/astrbot_plugin_llm_router/releases/tag/v0.0.2
 [v0.0.1]: https://github.com/Lan-0v0/astrbot_plugin_llm_router/releases/tag/v0.0.1

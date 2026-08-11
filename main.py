@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -50,7 +51,7 @@ except (
     "astrbot_plugin_llm_router",
     "Lan-0v0",
     "按规则或 LLM 类型判断将消息路由到指定模型，并支持白名单与黑名单。",
-    "0.0.2",
+    "0.0.3",
 )
 class LLMRouterPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
@@ -75,8 +76,8 @@ class LLMRouterPlugin(Star):
                         error,
                     )
             logger.warning(
-                "已将旧版路由条目迁移至 v0.0.2 配置格式。"
-                "请为每个条目重新选择 AstrBot 路由模型。"
+                "已将路由条目迁移至当前配置格式。"
+                "若条目尚未选择 AstrBot 路由模型，请重新选择。"
             )
         logger.info("LLM Router 插件已加载。")
 
@@ -112,6 +113,10 @@ class LLMRouterPlugin(Star):
         if route_match is None:
             return
 
+        routed_system_prompt = await self._resolve_route_system_prompt(
+            route_match.route_entry,
+            request.system_prompt,
+        )
         try:
             routed_response = await asyncio.wait_for(
                 self.context.llm_generate(
@@ -120,7 +125,7 @@ class LLMRouterPlugin(Star):
                     image_urls=list(request.image_urls or []),
                     audio_urls=list(request.audio_urls or []),
                     contexts=list(request.contexts or []),
-                    system_prompt=request.system_prompt,
+                    system_prompt=routed_system_prompt,
                     extra_user_content_parts=list(
                         request.extra_user_content_parts or []
                     ),
@@ -183,54 +188,135 @@ class LLMRouterPlugin(Star):
             logger.warning("已启用 LLM 判断，但尚未选择类型判断 LLM。")
             return None
 
-        system_prompt, user_prompt = build_classifier_prompts(
-            message_text,
-            routes_with_types,
-        )
-        try:
-            classifier_response = await asyncio.wait_for(
-                self.context.llm_generate(
-                    chat_provider_id=classifier_provider_id,
-                    prompt=user_prompt,
-                    contexts=[],
-                    system_prompt=system_prompt,
-                ),
-                timeout=45,
+        priority_groups: list[list[RouteEntry]] = []
+        for route_entry in routes_with_types:
+            if (
+                not priority_groups
+                or priority_groups[-1][0].priority != route_entry.priority
+            ):
+                priority_groups.append([])
+            priority_groups[-1].append(route_entry)
+
+        for priority_group in priority_groups:
+            group_routes = tuple(priority_group)
+            system_prompt, user_prompt = build_classifier_prompts(
+                message_text,
+                group_routes,
             )
-        except Exception as error:  # noqa: BLE001 - Provider adapters expose varied errors.
+            try:
+                classifier_response = await asyncio.wait_for(
+                    self.context.llm_generate(
+                        chat_provider_id=classifier_provider_id,
+                        prompt=user_prompt,
+                        contexts=[],
+                        system_prompt=system_prompt,
+                    ),
+                    timeout=45,
+                )
+            except Exception as error:  # noqa: BLE001 - Provider adapters expose varied errors.
+                logger.warning(
+                    "类型判断 LLM 调用失败，将继续使用 AstrBot 原模型。"
+                    "错误类型：%s，错误：%s",
+                    type(error).__name__,
+                    error,
+                )
+                return None
+
+            classifier_response_text = str(
+                getattr(classifier_response, "completion_text", "")
+            )
+            selected_route_id = parse_classification_route_id(
+                classifier_response_text,
+                group_routes,
+            )
+            if selected_route_id is None:
+                continue
+
+            selected_route = next(
+                (
+                    route_entry
+                    for route_entry in group_routes
+                    if route_entry.route_id == selected_route_id
+                ),
+                None,
+            )
+            if selected_route is not None:
+                return RouteMatch(
+                    route_entry=selected_route,
+                    judgement_method=LLM_JUDGEMENT_METHOD,
+                    matched_value=selected_route_id,
+                )
+        return None
+
+    async def _resolve_route_system_prompt(
+        self,
+        route_entry: RouteEntry,
+        current_system_prompt: str | None,
+    ) -> str | None:
+        persona_id = route_entry.persona_id
+        if not persona_id or persona_id.casefold() == "default":
+            return current_system_prompt
+
+        try:
+            persona_manager = self.context.persona_manager
+            selected_persona: Any = None
+
+            cached_persona_resolver = getattr(
+                persona_manager,
+                "get_persona_v3_by_id",
+                None,
+            )
+            if callable(cached_persona_resolver):
+                selected_persona = cached_persona_resolver(persona_id)
+
+            if selected_persona is None:
+                selected_persona = next(
+                    (
+                        persona
+                        for persona in getattr(persona_manager, "personas_v3", [])
+                        if str(persona.get("name", "")).strip() == persona_id
+                    ),
+                    None,
+                )
+
+            if selected_persona is None:
+                database_persona_getter = getattr(
+                    persona_manager,
+                    "get_persona",
+                    None,
+                )
+                if callable(database_persona_getter):
+                    selected_persona = await database_persona_getter(persona_id)
+
+            persona_prompt = self._extract_persona_prompt(selected_persona)
+        except Exception as error:  # noqa: BLE001 - Persona lookup is best-effort.
             logger.warning(
-                "类型判断 LLM 调用失败，将继续使用 AstrBot 原模型。"
+                "路由条目 '%s' 的人格 '%s' 读取失败，将沿用 AstrBot 当前人格。"
                 "错误类型：%s，错误：%s",
+                route_entry.name,
+                persona_id,
                 type(error).__name__,
                 error,
             )
-            return None
+            return current_system_prompt
 
-        classifier_response_text = str(
-            getattr(classifier_response, "completion_text", "")
-        )
-        selected_route_id = parse_classification_route_id(
-            classifier_response_text,
-            routes_with_types,
-        )
-        if selected_route_id is None:
-            return None
+        if not persona_prompt:
+            logger.warning(
+                "路由条目 '%s' 选择的人格 '%s' 不存在或提示词为空，"
+                "将沿用 AstrBot 当前人格。",
+                route_entry.name,
+                persona_id,
+            )
+            return current_system_prompt
+        return persona_prompt
 
-        selected_route = next(
-            (
-                route_entry
-                for route_entry in routes_with_types
-                if route_entry.route_id == selected_route_id
-            ),
-            None,
-        )
-        if selected_route is None:
-            return None
-        return RouteMatch(
-            route_entry=selected_route,
-            judgement_method=LLM_JUDGEMENT_METHOD,
-            matched_value=selected_route_id,
-        )
+    @staticmethod
+    def _extract_persona_prompt(persona: Any) -> str:
+        if persona is None:
+            return ""
+        if isinstance(persona, dict):
+            return str(persona.get("prompt", "")).strip()
+        return str(getattr(persona, "system_prompt", "")).strip()
 
     @staticmethod
     def _get_message_text(event: AstrMessageEvent, request: ProviderRequest) -> str:

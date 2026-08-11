@@ -29,6 +29,22 @@ class PluginSmokeTests(unittest.TestCase):
                 template_items["route_provider"]["_special"],
                 "select_provider",
             )
+            self.assertEqual(template_items["route_persona"]["default"], "")
+            self.assertEqual(
+                template_items["route_persona"]["_special"],
+                "select_persona",
+            )
+            item_names = list(template_items)
+            self.assertEqual(
+                item_names.index("route_persona"),
+                item_names.index("route_provider") + 1,
+            )
+            self.assertEqual(template_items["priority"]["type"], "int")
+            self.assertEqual(template_items["priority"]["default"], 100)
+            self.assertEqual(
+                template_items["priority"]["slider"],
+                {"min": 0, "max": 100, "step": 1},
+            )
             self.assertNotIn("api_base_url", template_items)
             self.assertNotIn("api_keys", template_items)
             self.assertNotIn("model", template_items)
@@ -86,9 +102,9 @@ class PluginSmokeTests(unittest.TestCase):
 
         self.assertIsNotNone(metadata_version_match)
         assert metadata_version_match is not None
-        self.assertEqual(metadata_version_match.group(1), "v0.0.2")
-        self.assertIn('"0.0.2",', main_text)
-        self.assertIn("## [v0.0.2]", changelog_text)
+        self.assertEqual(metadata_version_match.group(1), "v0.0.3")
+        self.assertIn('"0.0.3",', main_text)
+        self.assertIn("## [v0.0.3]", changelog_text)
 
     def test_metadata_contains_public_repository_information(self) -> None:
         metadata_text = (PROJECT_ROOT / "metadata.yaml").read_text(encoding="utf-8")
