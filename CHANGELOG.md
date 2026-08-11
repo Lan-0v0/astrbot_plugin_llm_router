@@ -2,6 +2,13 @@
 
 本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.0.4] - 2026-08-12
+
+### 变更
+
+- 只有路由条目未选择人格时才跟随当前 AstrBot 请求实际生效的人格。
+- 在路由条目中选择“默认人格”时，改为明确使用 AstrBot 自带默认人格，不再沿用当前会话选择的其他人格。
+
 ## [v0.0.3] - 2026-08-12
 
 ### 新增
@@ -43,6 +50,7 @@
 - 支持将成功的路由回复写回 AstrBot 会话历史。
 - 增加 AstrBot WebUI 配置 Schema、使用文档、测试和 GitHub 发布工作流。
 
+[v0.0.4]: https://github.com/Lan-0v0/astrbot_plugin_llm_router/releases/tag/v0.0.4
 [v0.0.3]: https://github.com/Lan-0v0/astrbot_plugin_llm_router/releases/tag/v0.0.3
 [v0.0.2]: https://github.com/Lan-0v0/astrbot_plugin_llm_router/releases/tag/v0.0.2
 [v0.0.1]: https://github.com/Lan-0v0/astrbot_plugin_llm_router/releases/tag/v0.0.1

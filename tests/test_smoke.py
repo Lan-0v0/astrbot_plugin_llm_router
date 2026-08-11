@@ -102,9 +102,9 @@ class PluginSmokeTests(unittest.TestCase):
 
         self.assertIsNotNone(metadata_version_match)
         assert metadata_version_match is not None
-        self.assertEqual(metadata_version_match.group(1), "v0.0.3")
-        self.assertIn('"0.0.3",', main_text)
-        self.assertIn("## [v0.0.3]", changelog_text)
+        self.assertEqual(metadata_version_match.group(1), "v0.0.4")
+        self.assertIn('"0.0.4",', main_text)
+        self.assertIn("## [v0.0.4]", changelog_text)
 
     def test_metadata_contains_public_repository_information(self) -> None:
         metadata_text = (PROJECT_ROOT / "metadata.yaml").read_text(encoding="utf-8")

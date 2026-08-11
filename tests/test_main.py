@@ -55,6 +55,7 @@ def install_astrbot_stubs() -> None:
     astrbot_core_module = types.ModuleType("astrbot.core")
     astrbot_agent_module = types.ModuleType("astrbot.core.agent")
     astrbot_message_module = types.ModuleType("astrbot.core.agent.message")
+    astrbot_persona_module = types.ModuleType("astrbot.core.persona_mgr")
 
     astrbot_api_module.AstrBotConfig = dict
     astrbot_api_module.logger = FakeLogger()
@@ -67,6 +68,10 @@ def install_astrbot_stubs() -> None:
     astrbot_message_module.TextPart = FakeTextPart
     astrbot_message_module.UserMessageSegment = FakeMessageSegment
     astrbot_message_module.AssistantMessageSegment = FakeMessageSegment
+    astrbot_persona_module.DEFAULT_PERSONALITY = {
+        "name": "default",
+        "prompt": "You are a helpful and friendly assistant.",
+    }
 
     sys.modules["astrbot"] = astrbot_module
     sys.modules["astrbot.api"] = astrbot_api_module
@@ -76,6 +81,7 @@ def install_astrbot_stubs() -> None:
     sys.modules["astrbot.core"] = astrbot_core_module
     sys.modules["astrbot.core.agent"] = astrbot_agent_module
     sys.modules["astrbot.core.agent.message"] = astrbot_message_module
+    sys.modules["astrbot.core.persona_mgr"] = astrbot_persona_module
 
 
 install_astrbot_stubs()
@@ -101,10 +107,20 @@ class FakeConversationManager:
 
 class FakePersonaManager:
     def __init__(self, persona_prompts: dict[str, str] | None = None) -> None:
+        available_persona_prompts = {
+            "default": "You are a helpful and friendly assistant.",
+        }
+        available_persona_prompts.update(persona_prompts or {})
         self.personas_v3 = [
             {"name": persona_id, "prompt": persona_prompt}
-            for persona_id, persona_prompt in (persona_prompts or {}).items()
+            for persona_id, persona_prompt in available_persona_prompts.items()
         ]
+
+    def get_persona_v3_by_id(self, persona_id: str) -> dict[str, str] | None:
+        return next(
+            (persona for persona in self.personas_v3 if persona["name"] == persona_id),
+            None,
+        )
 
 
 class FakeContext:
@@ -439,7 +455,7 @@ class PluginRoutingRegressionTests(unittest.IsolatedAsyncioTestCase):
             "You are a precise math expert.",
         )
 
-    async def test_default_persona_selection_follows_current_system_prompt(
+    async def test_default_persona_selection_uses_astrbot_builtin_default(
         self,
     ) -> None:
         context = FakeContext({"route-provider": "routed response"})
@@ -458,7 +474,37 @@ class PluginRoutingRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         await plugin.route_llm_request(event, make_provider_request("解这个方程"))
 
-        self.assertEqual(context.llm_calls[0]["system_prompt"], "system prompt")
+        self.assertEqual(
+            context.llm_calls[0]["system_prompt"],
+            "You are a helpful and friendly assistant.",
+        )
+
+    async def test_default_persona_uses_astrbot_constant_on_legacy_versions(
+        self,
+    ) -> None:
+        context = FakeContext({"route-provider": "routed response"})
+        context.persona_manager = SimpleNamespace(
+            personas_v3=[{"name": "configured-persona", "prompt": "Configured prompt"}]
+        )
+        config = {
+            "judgement_methods": ["规则匹配"],
+            "routing_models": [
+                make_route_entry(
+                    rule_keywords=["方程"],
+                    content_types=[],
+                    route_persona="default",
+                )
+            ],
+        }
+        plugin = LLMRouterPlugin(context, config)
+        event = FakeEvent()
+
+        await plugin.route_llm_request(event, make_provider_request("解这个方程"))
+
+        self.assertEqual(
+            context.llm_calls[0]["system_prompt"],
+            "You are a helpful and friendly assistant.",
+        )
 
     async def test_selected_persona_does_not_override_classifier_prompt(
         self,

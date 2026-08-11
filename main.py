@@ -51,7 +51,7 @@ except (
     "astrbot_plugin_llm_router",
     "Lan-0v0",
     "按规则或 LLM 类型判断将消息路由到指定模型，并支持白名单与黑名单。",
-    "0.0.3",
+    "0.0.4",
 )
 class LLMRouterPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
@@ -254,7 +254,7 @@ class LLMRouterPlugin(Star):
         current_system_prompt: str | None,
     ) -> str | None:
         persona_id = route_entry.persona_id
-        if not persona_id or persona_id.casefold() == "default":
+        if not persona_id:
             return current_system_prompt
 
         try:
@@ -278,6 +278,11 @@ class LLMRouterPlugin(Star):
                     ),
                     None,
                 )
+
+            if selected_persona is None and persona_id.casefold() == "default":
+                from astrbot.core.persona_mgr import DEFAULT_PERSONALITY
+
+                selected_persona = DEFAULT_PERSONALITY
 
             if selected_persona is None:
                 database_persona_getter = getattr(

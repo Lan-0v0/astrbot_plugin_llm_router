@@ -55,7 +55,7 @@
             "type": "string",
             "default": "",
             "_special": "select_persona",
-            "hint": "未选择或选择默认人格时，沿用当前 AstrBot 请求的人格设定；选择其他 AstrBot 人格时，仅为此路由模型覆盖系统提示词。"
+            "hint": "不选择时沿用当前 AstrBot 请求实际生效的人格；选择默认人格或其他 AstrBot 人格时，仅为此路由模型使用所选人格的系统提示词。"
           },
           "priority": {
             "description": "优先级",
