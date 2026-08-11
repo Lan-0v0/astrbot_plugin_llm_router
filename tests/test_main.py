@@ -83,19 +83,9 @@ install_astrbot_stubs()
 from main import LLMRouterPlugin  # noqa: E402
 
 
-class FakeClassifierResponse:
+class FakeLLMResponse:
     def __init__(self, completion_text: str) -> None:
         self.completion_text = completion_text
-
-
-class FakeClassifierProvider:
-    def __init__(self, completion_text: str) -> None:
-        self.completion_text = completion_text
-        self.call_count = 0
-
-    async def text_chat(self, **kwargs: Any) -> FakeClassifierResponse:
-        self.call_count += 1
-        return FakeClassifierResponse(self.completion_text)
 
 
 class FakeConversationManager:
@@ -110,32 +100,31 @@ class FakeConversationManager:
 
 
 class FakeContext:
-    def __init__(self, classifier_provider: FakeClassifierProvider) -> None:
-        self.classifier_provider = classifier_provider
+    def __init__(
+        self,
+        provider_responses: dict[str, str],
+        provider_errors: dict[str, Exception] | None = None,
+    ) -> None:
+        self.provider_responses = provider_responses
+        self.provider_errors = provider_errors or {}
+        self.llm_calls: list[dict[str, Any]] = []
         self.conversation_manager = FakeConversationManager()
 
-    def get_provider_by_id(self, provider_id: str) -> FakeClassifierProvider | None:
-        if provider_id == "classifier-provider":
-            return self.classifier_provider
-        return None
+    async def llm_generate(self, **kwargs: Any) -> FakeLLMResponse:
+        self.llm_calls.append(kwargs)
+        provider_id = str(kwargs["chat_provider_id"])
+        if provider_id in self.provider_errors:
+            raise self.provider_errors[provider_id]
+        return FakeLLMResponse(self.provider_responses.get(provider_id, ""))
 
 
-class FakeModelClient:
-    def __init__(
-        self, response_text: str = "routed response", error: Exception | None = None
-    ) -> None:
-        self.response_text = response_text
-        self.error = error
-        self.generated_routes: list[Any] = []
+class FakeConfig(dict):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.save_count = 0
 
-    async def generate(self, route_entry, generation_input) -> str:
-        self.generated_routes.append(route_entry)
-        if self.error is not None:
-            raise self.error
-        return self.response_text
-
-    async def close(self) -> None:
-        return None
+    def save_config(self) -> None:
+        self.save_count += 1
 
 
 class FakeEvent:
@@ -166,11 +155,12 @@ class FakeEvent:
 def make_provider_request(prompt: str) -> SimpleNamespace:
     return SimpleNamespace(
         prompt=prompt,
-        contexts=[],
+        contexts=[{"role": "user", "content": "previous question"}],
         system_prompt="system prompt",
-        image_urls=[],
-        audio_urls=[],
-        extra_user_content_parts=[],
+        image_urls=["image-url"],
+        audio_urls=["audio-path"],
+        extra_user_content_parts=[{"type": "text", "text": "dynamic context"}],
+        tool_calls_result=None,
     )
 
 
@@ -178,14 +168,13 @@ def make_route_entry(
     *,
     rule_keywords: list[str],
     content_types: list[str],
+    route_provider: str = "route-provider",
 ) -> dict[str, Any]:
     return {
-        "__template_key": "openai_compatible",
+        "__template_key": "route",
         "name": "math route",
         "enabled": True,
-        "api_base_url": "https://example.com/v1",
-        "model": "math-model",
-        "api_keys": ["secret-key"],
+        "route_provider": route_provider,
         "content_types": content_types,
         "rule_keywords": rule_keywords,
         "whitelist": [],
@@ -194,13 +183,38 @@ def make_route_entry(
 
 
 class PluginRoutingRegressionTests(unittest.IsolatedAsyncioTestCase):
-    async def test_rule_match_prevents_llm_classification_when_both_are_enabled(
+    async def test_initialize_migrates_and_saves_legacy_entries(self) -> None:
+        context = FakeContext({})
+        config = FakeConfig(
+            routing_models=[
+                {
+                    "__template_key": "deepseek",
+                    "name": "legacy route",
+                    "api_base_url": "https://api.deepseek.com",
+                    "api_keys": ["secret-key"],
+                    "model": "deepseek-chat",
+                    "content_types": ["数学问题"],
+                }
+            ]
+        )
+        plugin = LLMRouterPlugin(context, config)
+
+        await plugin.initialize()
+
+        self.assertEqual(config.save_count, 1)
+        self.assertEqual(config["routing_models"][0]["__template_key"], "route")
+        self.assertEqual(config["routing_models"][0]["route_provider"], "")
+        self.assertNotIn("api_keys", config["routing_models"][0])
+
+    async def test_rule_match_skips_classifier_and_calls_selected_provider(
         self,
     ) -> None:
-        classifier_provider = FakeClassifierProvider(
-            '{"route_id":null,"matched_type":null}'
+        context = FakeContext(
+            {
+                "classifier-provider": '{"route_id":null,"matched_type":null}',
+                "route-provider": "routed response",
+            }
         )
-        context = FakeContext(classifier_provider)
         config = {
             "judgement_methods": ["规则匹配", "LLM判断"],
             "type_judgement_provider": "classifier-provider",
@@ -212,23 +226,32 @@ class PluginRoutingRegressionTests(unittest.IsolatedAsyncioTestCase):
             ],
         }
         plugin = LLMRouterPlugin(context, config)
-        fake_model_client = FakeModelClient()
-        plugin._model_client = fake_model_client
         event = FakeEvent()
 
         await plugin.route_llm_request(event, make_provider_request("解这个方程"))
 
-        self.assertEqual(classifier_provider.call_count, 0)
-        self.assertEqual(len(fake_model_client.generated_routes), 1)
+        self.assertEqual(
+            [call["chat_provider_id"] for call in context.llm_calls],
+            ["route-provider"],
+        )
+        routed_call = context.llm_calls[0]
+        self.assertEqual(routed_call["contexts"][0]["content"], "previous question")
+        self.assertEqual(
+            routed_call["extra_user_content_parts"][0]["text"], "dynamic context"
+        )
         self.assertTrue(event.stopped)
         self.assertEqual(event.sent_results, [{"text": "routed response"}])
         self.assertEqual(len(context.conversation_manager.saved_pairs), 1)
 
     async def test_llm_classification_runs_after_rule_miss(self) -> None:
-        classifier_provider = FakeClassifierProvider(
-            '{"route_id":"route_0","matched_type":"数学问题"}'
+        context = FakeContext(
+            {
+                "classifier-provider": (
+                    '{"route_id":"route_0","matched_type":"数学问题"}'
+                ),
+                "route-provider": "routed response",
+            }
         )
-        context = FakeContext(classifier_provider)
         config = {
             "judgement_methods": ["规则匹配", "LLM判断"],
             "type_judgement_provider": "classifier-provider",
@@ -240,48 +263,44 @@ class PluginRoutingRegressionTests(unittest.IsolatedAsyncioTestCase):
             ],
         }
         plugin = LLMRouterPlugin(context, config)
-        fake_model_client = FakeModelClient()
-        plugin._model_client = fake_model_client
         event = FakeEvent()
 
         await plugin.route_llm_request(event, make_provider_request("证明勾股定理"))
 
-        self.assertEqual(classifier_provider.call_count, 1)
-        self.assertEqual(len(fake_model_client.generated_routes), 1)
+        self.assertEqual(
+            [call["chat_provider_id"] for call in context.llm_calls],
+            ["classifier-provider", "route-provider"],
+        )
         self.assertTrue(event.stopped)
 
     async def test_no_llm_match_keeps_original_astrbot_flow(self) -> None:
-        classifier_provider = FakeClassifierProvider(
-            '{"route_id":null,"matched_type":null}'
+        context = FakeContext(
+            {"classifier-provider": '{"route_id":null,"matched_type":null}'}
         )
-        context = FakeContext(classifier_provider)
         config = {
             "judgement_methods": ["LLM判断"],
             "type_judgement_provider": "classifier-provider",
             "routing_models": [
-                make_route_entry(
-                    rule_keywords=[],
-                    content_types=["数学问题"],
-                )
+                make_route_entry(rule_keywords=[], content_types=["数学问题"])
             ],
         }
         plugin = LLMRouterPlugin(context, config)
-        fake_model_client = FakeModelClient()
-        plugin._model_client = fake_model_client
         event = FakeEvent()
 
         await plugin.route_llm_request(event, make_provider_request("今天天气如何"))
 
-        self.assertEqual(classifier_provider.call_count, 1)
-        self.assertEqual(fake_model_client.generated_routes, [])
+        self.assertEqual(
+            [call["chat_provider_id"] for call in context.llm_calls],
+            ["classifier-provider"],
+        )
         self.assertFalse(event.stopped)
         self.assertEqual(event.sent_results, [])
 
-    async def test_route_api_failure_keeps_original_astrbot_flow(self) -> None:
-        classifier_provider = FakeClassifierProvider(
-            '{"route_id":"route_0","matched_type":"数学问题"}'
+    async def test_route_provider_failure_keeps_original_astrbot_flow(self) -> None:
+        context = FakeContext(
+            {},
+            provider_errors={"route-provider": RuntimeError("provider unavailable")},
         )
-        context = FakeContext(classifier_provider)
         config = {
             "judgement_methods": ["规则匹配"],
             "type_judgement_provider": "classifier-provider",
@@ -293,13 +312,32 @@ class PluginRoutingRegressionTests(unittest.IsolatedAsyncioTestCase):
             ],
         }
         plugin = LLMRouterPlugin(context, config)
-        plugin._model_client = FakeModelClient(error=RuntimeError("API unavailable"))
         event = FakeEvent()
 
         await plugin.route_llm_request(event, make_provider_request("解方程"))
 
         self.assertFalse(event.stopped)
         self.assertEqual(event.sent_results, [])
+
+    async def test_entry_without_selected_provider_is_ignored(self) -> None:
+        context = FakeContext({"route-provider": "should not be used"})
+        config = {
+            "judgement_methods": ["规则匹配"],
+            "routing_models": [
+                make_route_entry(
+                    rule_keywords=["方程"],
+                    content_types=["数学问题"],
+                    route_provider="",
+                )
+            ],
+        }
+        plugin = LLMRouterPlugin(context, config)
+        event = FakeEvent()
+
+        await plugin.route_llm_request(event, make_provider_request("解方程"))
+
+        self.assertEqual(context.llm_calls, [])
+        self.assertFalse(event.stopped)
 
 
 if __name__ == "__main__":

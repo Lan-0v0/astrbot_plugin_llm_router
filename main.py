@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
-from typing import Any
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -15,17 +13,16 @@ from astrbot.core.agent.message import (
 )
 
 try:
-    from .api_clients import RoutedModelClient
     from .router_core import (
         LLM_JUDGEMENT_METHOD,
         RULE_MATCH_METHOD,
-        GenerationInput,
         IdentityContext,
         RouteEntry,
         RouteMatch,
         build_classifier_prompts,
         filter_eligible_routes,
         find_rule_match,
+        migrate_route_entry_mappings,
         parse_classification_route_id,
         parse_judgement_methods,
         parse_route_entries,
@@ -33,17 +30,16 @@ try:
 except (
     ImportError
 ):  # pragma: no cover - AstrBot may add the plugin directory to sys.path.
-    from api_clients import RoutedModelClient
     from router_core import (
         LLM_JUDGEMENT_METHOD,
         RULE_MATCH_METHOD,
-        GenerationInput,
         IdentityContext,
         RouteEntry,
         RouteMatch,
         build_classifier_prompts,
         filter_eligible_routes,
         find_rule_match,
+        migrate_route_entry_mappings,
         parse_classification_route_id,
         parse_judgement_methods,
         parse_route_entries,
@@ -54,15 +50,34 @@ except (
     "astrbot_plugin_llm_router",
     "Lan-0v0",
     "按规则或 LLM 类型判断将消息路由到指定模型，并支持白名单与黑名单。",
-    "0.0.1",
+    "0.0.2",
 )
 class LLMRouterPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
         super().__init__(context)
         self.config = config
-        self._model_client = RoutedModelClient()
 
     async def initialize(self) -> None:
+        migrated_entries, configuration_changed = migrate_route_entry_mappings(
+            self.config.get("routing_models", [])
+        )
+        if configuration_changed:
+            self.config["routing_models"] = migrated_entries
+            save_config = getattr(self.config, "save_config", None)
+            if callable(save_config):
+                try:
+                    save_config()
+                except Exception as error:  # noqa: BLE001 - Migration is best-effort.
+                    logger.warning(
+                        "旧版路由条目已在内存中迁移，但保存配置失败。"
+                        "错误类型：%s，错误：%s",
+                        type(error).__name__,
+                        error,
+                    )
+            logger.warning(
+                "已将旧版路由条目迁移至 v0.0.2 配置格式。"
+                "请为每个条目重新选择 AstrBot 路由模型。"
+            )
         logger.info("LLM Router 插件已加载。")
 
     @filter.on_llm_request()
@@ -97,11 +112,21 @@ class LLMRouterPlugin(Star):
         if route_match is None:
             return
 
-        generation_input = self._build_generation_input(request, message_text)
         try:
-            response_text = await self._model_client.generate(
-                route_match.route_entry,
-                generation_input,
+            routed_response = await asyncio.wait_for(
+                self.context.llm_generate(
+                    chat_provider_id=route_match.route_entry.provider_id,
+                    prompt=str(request.prompt or message_text),
+                    image_urls=list(request.image_urls or []),
+                    audio_urls=list(request.audio_urls or []),
+                    contexts=list(request.contexts or []),
+                    system_prompt=request.system_prompt,
+                    extra_user_content_parts=list(
+                        request.extra_user_content_parts or []
+                    ),
+                    tool_calls_result=request.tool_calls_result,
+                ),
+                timeout=90,
             )
         except Exception as error:  # noqa: BLE001 - Fail open to AstrBot's original model.
             logger.warning(
@@ -113,7 +138,7 @@ class LLMRouterPlugin(Star):
             )
             return
 
-        response_text = response_text.strip()
+        response_text = str(getattr(routed_response, "completion_text", "")).strip()
         if not response_text:
             logger.warning(
                 "路由模型 '%s' 返回空内容，将继续使用 AstrBot 原模型。",
@@ -158,21 +183,14 @@ class LLMRouterPlugin(Star):
             logger.warning("已启用 LLM 判断，但尚未选择类型判断 LLM。")
             return None
 
-        classifier_provider = self.context.get_provider_by_id(classifier_provider_id)
-        if classifier_provider is None or not hasattr(classifier_provider, "text_chat"):
-            logger.warning(
-                "找不到可用的类型判断 LLM 提供商 '%s'。",
-                classifier_provider_id,
-            )
-            return None
-
         system_prompt, user_prompt = build_classifier_prompts(
             message_text,
             routes_with_types,
         )
         try:
             classifier_response = await asyncio.wait_for(
-                classifier_provider.text_chat(
+                self.context.llm_generate(
+                    chat_provider_id=classifier_provider_id,
                     prompt=user_prompt,
                     contexts=[],
                     system_prompt=system_prompt,
@@ -244,46 +262,6 @@ class LLMRouterPlugin(Star):
         except Exception:  # noqa: BLE001 - Platform adapters may raise arbitrary errors.
             return ""
 
-    @staticmethod
-    def _build_generation_input(
-        request: ProviderRequest,
-        fallback_message_text: str,
-    ) -> GenerationInput:
-        raw_contexts = getattr(request, "contexts", []) or []
-        contexts = tuple(
-            dict(raw_context)
-            for raw_context in raw_contexts
-            if isinstance(raw_context, Mapping)
-        )
-        extra_user_texts = tuple(
-            extracted_text
-            for raw_content_part in getattr(request, "extra_user_content_parts", [])
-            or []
-            if (
-                extracted_text := LLMRouterPlugin._extract_content_part_text(
-                    raw_content_part
-                )
-            )
-        )
-        return GenerationInput(
-            prompt=str(getattr(request, "prompt", None) or fallback_message_text),
-            system_prompt=str(getattr(request, "system_prompt", "") or ""),
-            contexts=contexts,
-            image_urls=tuple(
-                str(item) for item in getattr(request, "image_urls", []) or []
-            ),
-            audio_urls=tuple(
-                str(item) for item in getattr(request, "audio_urls", []) or []
-            ),
-            extra_user_texts=extra_user_texts,
-        )
-
-    @staticmethod
-    def _extract_content_part_text(content_part: Any) -> str:
-        if isinstance(content_part, Mapping):
-            return str(content_part.get("text", "") or "").strip()
-        return str(getattr(content_part, "text", "") or "").strip()
-
     async def _persist_conversation_pair(
         self,
         event: AstrMessageEvent,
@@ -310,6 +288,3 @@ class LLMRouterPlugin(Star):
                 type(error).__name__,
                 error,
             )
-
-    async def terminate(self) -> None:
-        await self._model_client.close()

@@ -30,12 +30,11 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
-          cache: pip
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt ruff pyyaml
+          python -m pip install ruff pyyaml
 
       - name: Run regression tests
         run: python -m unittest discover -s tests -v
@@ -60,7 +59,7 @@ jobs:
           schema = json.loads(Path("_conf_schema.json").read_text(encoding="utf-8"))
 
           assert metadata["name"] == "astrbot_plugin_llm_router"
-          assert metadata["version"] == "v0.0.1"
+          assert metadata["version"] == "v0.0.2"
           assert metadata["repo"] == "https://github.com/Lan-0v0/astrbot_plugin_llm_router"
           assert schema["routing_models"]["type"] == "template_list"
           PY

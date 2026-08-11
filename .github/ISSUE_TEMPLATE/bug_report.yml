@@ -12,7 +12,7 @@ body:
     id: plugin-version
     attributes:
       label: 插件版本
-      placeholder: v0.0.1
+      placeholder: v0.0.2
     validations:
       required: true
   - type: input
@@ -25,12 +25,13 @@ body:
   - type: dropdown
     id: route-provider
     attributes:
-      label: 路由模型类型
+      label: AstrBot 路由模型提供商
       options:
-        - OpenAI 兼容
-        - Gemini
+        - OpenAI 或 OpenAI 兼容
+        - Gemini 或 Google
         - DeepSeek
-        - Zhipu
+        - Zhipu 或智谱
+        - 其他 AstrBot 聊天模型提供商
         - 与路由模型无关
     validations:
       required: true

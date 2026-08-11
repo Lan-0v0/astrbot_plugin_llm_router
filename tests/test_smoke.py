@@ -20,11 +20,18 @@ class PluginSmokeTests(unittest.TestCase):
         )
         self.assertEqual(
             set(schema["routing_models"]["templates"]),
-            {"openai_compatible", "gemini", "deepseek", "zhipu"},
+            {"route"},
         )
         for route_template in schema["routing_models"]["templates"].values():
             template_items = route_template["items"]
-            self.assertIn("model", template_items)
+            self.assertIn("route_provider", template_items)
+            self.assertEqual(
+                template_items["route_provider"]["_special"],
+                "select_provider",
+            )
+            self.assertNotIn("api_base_url", template_items)
+            self.assertNotIn("api_keys", template_items)
+            self.assertNotIn("model", template_items)
             self.assertIn("content_types", template_items)
             self.assertIn("rule_keywords", template_items)
             self.assertIn("whitelist", template_items)
@@ -37,10 +44,8 @@ class PluginSmokeTests(unittest.TestCase):
             ".github/workflows/release.yml",
             "main.py",
             "router_core.py",
-            "api_clients.py",
             "metadata.yaml",
             "_conf_schema.json",
-            "requirements.txt",
             "README.md",
             "CHANGELOG.md",
             "CONTRIBUTING.md",
@@ -56,6 +61,18 @@ class PluginSmokeTests(unittest.TestCase):
 
         self.assertEqual(missing_files, [])
 
+        removed_files = {
+            "api_clients.py",
+            "requirements.txt",
+            "tests/test_api_clients.py",
+        }
+        unexpected_files = [
+            file_name
+            for file_name in removed_files
+            if (PROJECT_ROOT / file_name).is_file()
+        ]
+        self.assertEqual(unexpected_files, [])
+
     def test_release_version_is_consistent(self) -> None:
         metadata_text = (PROJECT_ROOT / "metadata.yaml").read_text(encoding="utf-8")
         main_text = (PROJECT_ROOT / "main.py").read_text(encoding="utf-8")
@@ -69,9 +86,9 @@ class PluginSmokeTests(unittest.TestCase):
 
         self.assertIsNotNone(metadata_version_match)
         assert metadata_version_match is not None
-        self.assertEqual(metadata_version_match.group(1), "v0.0.1")
-        self.assertIn('"0.0.1",', main_text)
-        self.assertIn("## [v0.0.1]", changelog_text)
+        self.assertEqual(metadata_version_match.group(1), "v0.0.2")
+        self.assertIn('"0.0.2",', main_text)
+        self.assertIn("## [v0.0.2]", changelog_text)
 
     def test_metadata_contains_public_repository_information(self) -> None:
         metadata_text = (PROJECT_ROOT / "metadata.yaml").read_text(encoding="utf-8")

@@ -9,30 +9,15 @@ from typing import Any
 RULE_MATCH_METHOD = "rule"
 LLM_JUDGEMENT_METHOD = "llm"
 
-DEFAULT_API_BASE_URLS = {
-    "openai_compatible": "https://api.openai.com/v1",
-    "gemini": "https://generativelanguage.googleapis.com/v1beta",
-    "deepseek": "https://api.deepseek.com",
-    "zhipu": "https://open.bigmodel.cn/api/paas/v4",
-}
-
-DEFAULT_MODEL_NAMES = {
-    "openai_compatible": "gpt-4o-mini",
-    "gemini": "gemini-2.0-flash",
-    "deepseek": "deepseek-chat",
-    "zhipu": "glm-4-flash",
-}
-
-PROVIDER_KIND_ALIASES = {
-    "openai_compatible": "openai_compatible",
-    "openai-compatible": "openai_compatible",
-    "openai": "openai_compatible",
-    "openai兼容": "openai_compatible",
-    "gemini": "gemini",
-    "deepseek": "deepseek",
-    "zhipu": "zhipu",
-    "智谱": "zhipu",
-}
+ROUTE_ENTRY_FIELDS = (
+    "name",
+    "enabled",
+    "route_provider",
+    "content_types",
+    "rule_keywords",
+    "whitelist",
+    "blacklist",
+)
 
 
 def normalize_string_list(value: Any) -> tuple[str, ...]:
@@ -85,12 +70,9 @@ def parse_judgement_methods(value: Any) -> frozenset[str]:
 @dataclass(frozen=True)
 class RouteEntry:
     route_id: str
-    provider_kind: str
     name: str
     enabled: bool
-    api_base_url: str
-    model_name: str
-    api_keys: tuple[str, ...]
+    provider_id: str
     content_types: tuple[str, ...]
     rule_keywords: tuple[str, ...]
     whitelist: tuple[str, ...]
@@ -98,28 +80,16 @@ class RouteEntry:
 
     @classmethod
     def from_mapping(cls, raw_entry: Mapping[str, Any], entry_index: int) -> RouteEntry:
-        raw_provider_kind = str(
-            raw_entry.get("__template_key", "openai_compatible")
-        ).strip()
-        provider_kind = PROVIDER_KIND_ALIASES.get(
-            raw_provider_kind.casefold(),
-            raw_provider_kind.casefold(),
-        )
         route_id = f"route_{entry_index}"
         route_name = (
             str(raw_entry.get("name", "")).strip() or f"路由模型 {entry_index + 1}"
         )
-        api_base_url = str(raw_entry.get("api_base_url", "")).strip()
-        model_name = str(raw_entry.get("model", "")).strip()
 
         return cls(
             route_id=route_id,
-            provider_kind=provider_kind,
             name=route_name,
             enabled=bool(raw_entry.get("enabled", True)),
-            api_base_url=api_base_url or DEFAULT_API_BASE_URLS.get(provider_kind, ""),
-            model_name=model_name or DEFAULT_MODEL_NAMES.get(provider_kind, ""),
-            api_keys=normalize_string_list(raw_entry.get("api_keys")),
+            provider_id=str(raw_entry.get("route_provider", "")).strip(),
             content_types=normalize_string_list(raw_entry.get("content_types")),
             rule_keywords=normalize_string_list(raw_entry.get("rule_keywords")),
             whitelist=normalize_string_list(raw_entry.get("whitelist")),
@@ -128,7 +98,7 @@ class RouteEntry:
 
     @property
     def is_request_ready(self) -> bool:
-        return self.enabled and bool(self.api_base_url) and bool(self.model_name)
+        return self.enabled and bool(self.provider_id)
 
 
 def parse_route_entries(value: Any) -> tuple[RouteEntry, ...]:
@@ -139,10 +109,41 @@ def parse_route_entries(value: Any) -> tuple[RouteEntry, ...]:
     for entry_index, raw_entry in enumerate(value):
         if not isinstance(raw_entry, Mapping):
             continue
-        parsed_entry = RouteEntry.from_mapping(raw_entry, entry_index)
-        if parsed_entry.provider_kind in DEFAULT_API_BASE_URLS:
-            parsed_entries.append(parsed_entry)
+        parsed_entries.append(RouteEntry.from_mapping(raw_entry, entry_index))
     return tuple(parsed_entries)
+
+
+def migrate_route_entry_mappings(value: Any) -> tuple[list[dict[str, Any]], bool]:
+    """Remove legacy credentials and normalize entries to the v0.0.2 template."""
+
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return [], bool(value)
+
+    migrated_entries: list[dict[str, Any]] = []
+    configuration_changed = False
+    for raw_entry in value:
+        if not isinstance(raw_entry, Mapping):
+            configuration_changed = True
+            continue
+
+        migrated_entry = {"__template_key": "route"}
+        for field_name in ROUTE_ENTRY_FIELDS:
+            if field_name in raw_entry:
+                migrated_entry[field_name] = raw_entry[field_name]
+
+        migrated_entry.setdefault("name", "路由条目")
+        migrated_entry.setdefault("enabled", True)
+        migrated_entry.setdefault("route_provider", "")
+        migrated_entry.setdefault("content_types", [])
+        migrated_entry.setdefault("rule_keywords", [])
+        migrated_entry.setdefault("whitelist", [])
+        migrated_entry.setdefault("blacklist", [])
+
+        if dict(raw_entry) != migrated_entry:
+            configuration_changed = True
+        migrated_entries.append(migrated_entry)
+
+    return migrated_entries, configuration_changed
 
 
 @dataclass(frozen=True)
@@ -323,13 +324,3 @@ def parse_classification_route_id(
     if len(matching_routes_by_type) == 1:
         return matching_routes_by_type[0]
     return None
-
-
-@dataclass(frozen=True)
-class GenerationInput:
-    prompt: str
-    system_prompt: str
-    contexts: tuple[dict[str, Any], ...]
-    image_urls: tuple[str, ...]
-    audio_urls: tuple[str, ...]
-    extra_user_texts: tuple[str, ...]

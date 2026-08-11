@@ -8,6 +8,7 @@ from router_core import (
     build_classifier_prompts,
     filter_eligible_routes,
     find_rule_match,
+    migrate_route_entry_mappings,
     parse_classification_route_id,
     parse_judgement_methods,
     parse_route_entries,
@@ -21,14 +22,13 @@ def make_route_entry(
     rule_keywords: list[str] | None = None,
     whitelist: list[str] | None = None,
     blacklist: list[str] | None = None,
+    route_provider: str = "selected-provider",
 ) -> dict:
     return {
-        "__template_key": "openai_compatible",
+        "__template_key": "route",
         "name": name,
         "enabled": True,
-        "api_base_url": "https://example.com/v1",
-        "model": "example-model",
-        "api_keys": ["test-key"],
+        "route_provider": route_provider,
         "content_types": content_types or [],
         "rule_keywords": rule_keywords or [],
         "whitelist": whitelist or [],
@@ -177,19 +177,52 @@ class LLMClassificationTests(unittest.TestCase):
 
 
 class RouteParsingTests(unittest.TestCase):
-    def test_provider_defaults_are_applied(self) -> None:
-        route_entries = parse_route_entries(
+    def test_legacy_route_migration_removes_credentials(self) -> None:
+        migrated_entries, configuration_changed = migrate_route_entry_mappings(
             [
                 {
                     "__template_key": "deepseek",
-                    "name": "default deepseek",
+                    "name": "legacy route",
                     "enabled": True,
+                    "api_base_url": "https://api.deepseek.com",
+                    "api_keys": ["secret-key"],
+                    "model": "deepseek-chat",
+                    "content_types": ["数学问题"],
+                    "rule_keywords": ["方程"],
                 }
             ]
         )
 
-        self.assertEqual(route_entries[0].api_base_url, "https://api.deepseek.com")
-        self.assertEqual(route_entries[0].model_name, "deepseek-chat")
+        self.assertTrue(configuration_changed)
+        self.assertEqual(migrated_entries[0]["__template_key"], "route")
+        self.assertEqual(migrated_entries[0]["route_provider"], "")
+        self.assertNotIn("api_base_url", migrated_entries[0])
+        self.assertNotIn("api_keys", migrated_entries[0])
+        self.assertNotIn("model", migrated_entries[0])
+
+    def test_current_route_migration_is_idempotent(self) -> None:
+        current_entry = make_route_entry("current")
+
+        migrated_entries, configuration_changed = migrate_route_entry_mappings(
+            [current_entry]
+        )
+
+        self.assertFalse(configuration_changed)
+        self.assertEqual(migrated_entries, [current_entry])
+
+    def test_selected_astrbot_provider_is_parsed(self) -> None:
+        route_entries = parse_route_entries([make_route_entry("selected")])
+
+        self.assertEqual(route_entries[0].provider_id, "selected-provider")
+
+    def test_route_without_selected_provider_is_not_eligible(self) -> None:
+        route_entries = parse_route_entries(
+            [make_route_entry("missing provider", route_provider="")]
+        )
+
+        eligible_routes = filter_eligible_routes(route_entries, IdentityContext())
+
+        self.assertEqual(eligible_routes, ())
 
     def test_disabled_route_is_not_eligible(self) -> None:
         raw_entry = make_route_entry("disabled")
