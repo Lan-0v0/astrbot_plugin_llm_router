@@ -1,0 +1,15 @@
+name: astrbot_plugin_llm_router
+display_name: LLM 模型路由器
+desc: 按规则词汇或 LLM 类型判断将消息路由到指定模型，支持条目级白名单与黑名单。
+short_desc: 规则优先、LLM 兜底的模型路由插件。
+version: v0.0.1
+author: Lan-0v0
+repo: https://github.com/Lan-0v0/astrbot_plugin_llm_router
+astrbot_version: ">=4.10.4,<5"
+social_link: https://github.com/Lan-0v0
+tags:
+  - llm
+  - router
+  - provider
+  - whitelist
+  - blacklist

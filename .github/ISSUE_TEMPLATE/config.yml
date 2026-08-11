@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: AstrBot 插件开发文档
+    url: https://docs.astrbot.app/dev/star/plugin-new.html
+    about: 查看 AstrBot 插件安装、配置和开发说明
+  - name: 私密安全报告
+    url: https://github.com/Lan-0v0/astrbot_plugin_llm_router/security/advisories/new
+    about: 请通过 Security Advisory 报告敏感安全问题
