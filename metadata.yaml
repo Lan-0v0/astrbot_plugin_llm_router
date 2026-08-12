@@ -1,11 +1,11 @@
 name: astrbot_plugin_llm_router
 display_name: LLM 模型路由器
-desc: 按规则词汇或 LLM 类型判断将消息路由到指定模型，支持人格、优先级、白名单与黑名单。
-short_desc: 支持人格与优先级的 LLM 模型路由插件。
-version: v0.0.5
+desc: 只为本次 AstrBot Agent 选择聊天模型与人格，支持规则、LLM 类型、优先级、白名单与黑名单路由。
+short_desc: 保留 AstrBot 原生 Agent 流程的聊天模型路由插件。
+version: v0.1.0
 author: Lan-0v0
 repo: https://github.com/Lan-0v0/astrbot_plugin_llm_router
-astrbot_version: ">=4.10.4,<5"
+astrbot_version: ">=4.11.0,<5"
 social_link: https://github.com/Lan-0v0
 tags:
   - llm

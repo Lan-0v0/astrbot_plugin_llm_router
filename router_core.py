@@ -4,6 +4,7 @@ import json
 import random
 import re
 from collections.abc import Iterable, Mapping, Sequence
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
@@ -11,6 +12,28 @@ RULE_MATCH_METHOD = "rule"
 LLM_JUDGEMENT_METHOD = "llm"
 DIRECT_ROUTE_METHOD = "direct"
 WHITELIST_DIRECT_ROUTE_METHOD = "whitelist_direct"
+
+MEDIA_PART_MODALITIES = {
+    "image": "image",
+    "image_url": "image",
+    "input_image": "image",
+    "audio": "audio",
+    "audio_url": "audio",
+    "input_audio": "audio",
+    "video": "video",
+    "video_url": "video",
+    "input_video": "video",
+}
+
+MODALITY_ALIASES = {
+    "image_url": "image",
+    "input_image": "image",
+    "vision": "image",
+    "audio_url": "audio",
+    "input_audio": "audio",
+    "video_url": "video",
+    "input_video": "video",
+}
 
 ROUTE_ENTRY_FIELDS = (
     "name",
@@ -426,3 +449,62 @@ def parse_classification_route_id(
     if len(matching_routes_by_type) == 1:
         return matching_routes_by_type[0]
     return None
+
+
+def sanitize_contexts_for_modalities(
+    contexts: Iterable[Any],
+    *,
+    supported_modalities: frozenset[str] | None,
+) -> list[Any]:
+    """Copy contexts and remove media blocks unsupported by the routed provider.
+
+    ``None`` means the provider capabilities are intentionally left unconfigured, so
+    the original contexts are preserved for AstrBot's backward-compatible behavior.
+    """
+
+    copied_contexts = deepcopy(list(contexts))
+    if supported_modalities is None:
+        return copied_contexts
+
+    normalized_modalities = frozenset(
+        MODALITY_ALIASES.get(modality.casefold(), modality.casefold())
+        for modality in supported_modalities
+    )
+
+    sanitized_contexts: list[Any] = []
+    for context_message in copied_contexts:
+        if not isinstance(context_message, Mapping):
+            sanitized_contexts.append(context_message)
+            continue
+
+        mutable_message = dict(context_message)
+        content = mutable_message.get("content")
+        if not isinstance(content, list):
+            sanitized_contexts.append(mutable_message)
+            continue
+
+        retained_content_parts: list[Any] = []
+        for content_part in content:
+            if not isinstance(content_part, Mapping):
+                retained_content_parts.append(content_part)
+                continue
+
+            content_part_type = str(content_part.get("type", "")).casefold()
+            required_modality = MEDIA_PART_MODALITIES.get(content_part_type)
+            if required_modality and required_modality not in normalized_modalities:
+                continue
+            retained_content_parts.append(content_part)
+
+        mutable_message["content"] = retained_content_parts
+        message_has_non_content_payload = any(
+            key not in {"role", "content"}
+            and value is not None
+            and value != ""
+            and value != []
+            and value != {}
+            for key, value in mutable_message.items()
+        )
+        if retained_content_parts or message_has_non_content_payload:
+            sanitized_contexts.append(mutable_message)
+
+    return sanitized_contexts

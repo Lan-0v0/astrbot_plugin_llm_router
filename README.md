@@ -3,11 +3,11 @@
 [![Release](https://img.shields.io/github/v/release/Lan-0v0/astrbot_plugin_llm_router)](https://github.com/Lan-0v0/astrbot_plugin_llm_router/releases)
 [![CI](https://github.com/Lan-0v0/astrbot_plugin_llm_router/actions/workflows/ci.yml/badge.svg)](https://github.com/Lan-0v0/astrbot_plugin_llm_router/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/Lan-0v0/astrbot_plugin_llm_router)](LICENSE)
-[![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.10.4-blue)](https://github.com/AstrBotDevs/AstrBot)
+[![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.11.0-blue)](https://github.com/AstrBotDevs/AstrBot)
 
-一个 AstrBot 模型路由插件。它在 AstrBot 即将调用原聊天模型前判断当前消息，并将命中的消息交给所选的 AstrBot 已有聊天模型提供商处理。
+一个 AstrBot 聊天模型路由插件。它在 AstrBot 构建主 Agent 前判断当前消息，只为本次请求选择命中的聊天模型；模型生成及其余阶段仍由 AstrBot 原生流程处理。
 
-当前版本：`v0.0.5`
+当前版本：`v0.1.0`
 
 ## 主要特性
 
@@ -15,7 +15,9 @@
 - 每个路由条目直接选择 AstrBot 已配置的聊天模型。
 - 每个路由条目可选择 AstrBot 已配置的人格，并只对命中的路由模型生效。
 - 模型地址、API Key 和具体模型名称由 AstrBot 统一管理，无需在插件中重复填写。
-- 未命中或分类、模型调用、消息发送失败时自动回退 AstrBot 原模型。
+- 插件只切换聊天模型；图片描述、STT、TTS、工具、fallback、流式、发送和历史记录均继续由 AstrBot 决定。
+- 对纯文本聊天模型清理历史上下文中的不兼容媒体块，避免旧 `image_url` 导致请求解析失败。
+- 未命中或分类失败时继续使用 AstrBot 原聊天模型。
 - 支持每个条目配置多个内容类型和规则词汇。
 - 支持无规则、无类型的公共条目直接接管未命中的消息。
 - 支持无规则、无类型的白名单条目直接接管对应白名单消息。
@@ -31,8 +33,9 @@
 4. 若启用“规则匹配”，按上述顺序检查“规则词汇”。
 5. 规则未命中且启用“LLM判断”时，按优先级分组调用“类型判断 LLM”，高优先级组未命中后才检查下一组。
 6. 规则和 LLM 均未命中后，若直接路由开关有效，则从没有配置规则词汇和类型的条目中选择最高优先级条目；同优先级随机。
-7. 命中后通过 AstrBot 的统一 LLM 接口调用该条目选择的“路由模型”。
-8. 未命中或任何路由环节失败时，不中断事件，继续使用 AstrBot 原本设置的 LLM。
+7. 命中后只把条目的“路由模型”写入本次事件的 `selected_provider`，不生成回复也不中断事件。
+8. AstrBot 使用所选聊天模型构建主 Agent，并继续完成媒体处理、工具调用、fallback、流式输出、TTS、发送和会话历史持久化。
+9. 未命中或分类失败时，不修改 `selected_provider`，继续使用 AstrBot 原本设置的聊天模型。
 
 因此，同时勾选两种判断方式时始终是**规则优先，LLM 判断兜底**。
 
@@ -72,7 +75,7 @@
 - 选择其他 AstrBot 人格时，插件读取所选人格的系统提示词，并仅覆盖命中的路由模型请求。
 - 类型判断 LLM 始终使用独立的分类器提示词，不会被路由条目的人格覆盖。
 - 如果所选人格已被删除、读取失败或提示词为空，插件会记录警告并沿用当前 AstrBot 人格，不中断路由。
-- 人格中的工具、技能和开场对话不会注入当前直连路由调用；本功能仅覆盖系统提示词。
+- 人格路由仅覆盖系统提示词；工具、技能和开场对话仍按 AstrBot 当前主 Agent 的原生配置决定。
 
 ## 白名单与黑名单
 
@@ -124,12 +127,15 @@
 
 > 从旧版本升级到 `v0.0.5` 时，两个开关默认开启。此前没有配置规则词汇和类型、因而不会命中的条目会成为直接路由候选；如需维持旧行为，请关闭“无需匹配/判断直接路由”。
 
-## AstrBot 模型调用
+## AstrBot 原生流程交接
 
-- 类型判断和目标模型生成均使用 AstrBot 公开的 `llm_generate` 接口。
-- 插件会传递本轮提示、系统提示、对话上下文、图片、音频和额外用户内容。
-- 路由回复会尽力写回 AstrBot 当前会话历史；写入失败不会影响已经发送的回复。
-- 当前路由调用不接管 AstrBot Agent 的工具调用循环；目标模型用于直接生成本轮文本回复。
+- 插件在 `on_waiting_llm_request` 阶段完成路由，并只设置本次事件的 `selected_provider`；类型判断 LLM 仍通过 AstrBot 的 `llm_generate` 接口独立完成分类。
+- AstrBot 随后构建 `ProviderRequest` 和主 Agent。插件在 `on_llm_request` 阶段只应用命中条目的人格系统提示词，并按所选聊天模型的输入模态兼容历史上下文。
+- 当前消息的图片、音频、额外内容和工具对象不会被插件删除。图片描述模型、STT、TTS、模型 fallback、工具调用循环、内容安全、上下文压缩、流式输出、最终发送与历史写入都由 AstrBot 决定。
+- 对纯文本聊天模型，历史上下文里的 `image_url`、音频或视频结构化内容块会被移除；同条消息中的文本、AstrBot 已生成的 `<image_caption>` 以及工具载荷会被保留。若提供商没有声明模态能力，插件为兼容旧配置而保持历史不变。
+- 本插件不会修改 AstrBot 配置文件中的默认聊天模型、图片描述模型、STT、TTS 或其他提供商设置；所有改动都只作用于当前消息请求。
+
+> `v0.1.0` 是行为升级：旧版本会直接生成并发送路由回复；新版本改为接入 AstrBot 主 Agent 生命周期。如需使用前置路由钩子，请先升级 AstrBot 至 `v4.11.0` 或更高版本。
 
 ## 安装
 
@@ -147,11 +153,11 @@ cd AstrBot/data/plugins
 git clone https://github.com/Lan-0v0/astrbot_plugin_llm_router.git
 ```
 
-`v0.0.5` 不包含额外的第三方 Python 依赖。
+`v0.1.0` 不包含额外的第三方 Python 依赖。
 
 ## 兼容性
 
-- AstrBot：`>=4.10.4,<5`
+- AstrBot：`>=4.11.0,<5`
 - Python：建议使用 AstrBot 当前支持的 Python 版本
 - 发布包遵循 AstrBot 插件市场不超过 16 MB 的限制
 

@@ -2,6 +2,25 @@
 
 本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.1.0] - 2026-08-12
+
+### 重大变更
+
+- 路由命中后不再由插件独立调用目标模型、发送回复或停止事件，而是仅为本次请求设置 AstrBot 的 `selected_provider`。
+- 最终生成完全回归 AstrBot 主 Agent：工具调用、模型 fallback、流式输出、内容安全、上下文管理、TTS、发送与会话历史持久化均继续使用 AstrBot 原生流程。
+
+### 变更
+
+- 路由决策迁移到 `on_waiting_llm_request` 前置钩子，人格覆盖保留在后续 `on_llm_request` 请求钩子中。
+- 插件只切换本次聊天模型，不修改 AstrBot 的图片描述模型、STT、TTS 或其他提供商配置。
+- 对不支持图片、音频或视频的路由聊天模型，仅清理历史上下文中对应的媒体内容块；同一消息中的文本、已有图片描述以及工具载荷均保留。
+- 当前消息携带的图片、音频、额外内容和工具对象不由插件删除，继续由 AstrBot 根据所选模型能力处理。
+- 最低 AstrBot 版本提升至 `v4.11.0`，以使用 `on_waiting_llm_request` 钩子。
+
+### 修复
+
+- 避免纯文本路由模型因历史上下文残留 OpenAI `image_url` 内容块而在请求解析阶段返回 HTTP 400。
+
 ## [v0.0.5] - 2026-08-12
 
 ### 新增
@@ -63,6 +82,7 @@
 - 支持将成功的路由回复写回 AstrBot 会话历史。
 - 增加 AstrBot WebUI 配置 Schema、使用文档、测试和 GitHub 发布工作流。
 
+[v0.1.0]: https://github.com/Lan-0v0/astrbot_plugin_llm_router/releases/tag/v0.1.0
 [v0.0.5]: https://github.com/Lan-0v0/astrbot_plugin_llm_router/releases/tag/v0.0.5
 [v0.0.4]: https://github.com/Lan-0v0/astrbot_plugin_llm_router/releases/tag/v0.0.4
 [v0.0.3]: https://github.com/Lan-0v0/astrbot_plugin_llm_router/releases/tag/v0.0.3

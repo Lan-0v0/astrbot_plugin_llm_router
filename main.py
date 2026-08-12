@@ -7,11 +7,6 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, register
-from astrbot.core.agent.message import (
-    AssistantMessageSegment,
-    TextPart,
-    UserMessageSegment,
-)
 
 try:
     from .router_core import (
@@ -28,6 +23,7 @@ try:
         parse_classification_route_id,
         parse_judgement_methods,
         parse_route_entries,
+        sanitize_contexts_for_modalities,
     )
 except (
     ImportError
@@ -46,14 +42,19 @@ except (
         parse_classification_route_id,
         parse_judgement_methods,
         parse_route_entries,
+        sanitize_contexts_for_modalities,
     )
+
+
+ROUTE_MATCH_EXTRA_KEY = "astrbot_plugin_llm_router.route_match"
+SELECTED_PROVIDER_EXTRA_KEY = "selected_provider"
 
 
 @register(
     "astrbot_plugin_llm_router",
     "Lan-0v0",
     "按规则或 LLM 类型判断将消息路由到指定模型，并支持白名单与黑名单。",
-    "0.0.5",
+    "0.1.0",
 )
 class LLMRouterPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
@@ -83,16 +84,9 @@ class LLMRouterPlugin(Star):
             )
         logger.info("LLM Router 插件已加载。")
 
-    @filter.on_llm_request()
-    async def route_llm_request(
-        self,
-        event: AstrMessageEvent,
-        request: ProviderRequest,
-    ) -> None:
-        message_text = self._get_message_text(event, request)
-        if not message_text:
-            return
-
+    @filter.on_waiting_llm_request()
+    async def select_route_provider(self, event: AstrMessageEvent) -> None:
+        message_text = str(getattr(event, "message_str", "") or "").strip()
         judgement_methods = parse_judgement_methods(
             self.config.get("judgement_methods")
         )
@@ -112,10 +106,14 @@ class LLMRouterPlugin(Star):
             return
 
         route_match: RouteMatch | None = None
-        if RULE_MATCH_METHOD in judgement_methods:
+        if message_text and RULE_MATCH_METHOD in judgement_methods:
             route_match = find_rule_match(message_text, eligible_routes)
 
-        if route_match is None and LLM_JUDGEMENT_METHOD in judgement_methods:
+        if (
+            route_match is None
+            and message_text
+            and LLM_JUDGEMENT_METHOD in judgement_methods
+        ):
             route_match = await self._find_llm_match(message_text, eligible_routes)
 
         if route_match is None and direct_routing_enabled:
@@ -136,61 +134,51 @@ class LLMRouterPlugin(Star):
         if route_match is None:
             return
 
-        routed_system_prompt = await self._resolve_route_system_prompt(
-            route_match.route_entry,
-            request.system_prompt,
+        selected_provider = self.context.get_provider_by_id(
+            route_match.route_entry.provider_id
         )
-        try:
-            routed_response = await asyncio.wait_for(
-                self.context.llm_generate(
-                    chat_provider_id=route_match.route_entry.provider_id,
-                    prompt=str(request.prompt or message_text),
-                    image_urls=list(request.image_urls or []),
-                    audio_urls=list(request.audio_urls or []),
-                    contexts=list(request.contexts or []),
-                    system_prompt=routed_system_prompt,
-                    extra_user_content_parts=list(
-                        request.extra_user_content_parts or []
-                    ),
-                    tool_calls_result=request.tool_calls_result,
-                ),
-                timeout=90,
-            )
-        except Exception as error:  # noqa: BLE001 - Fail open to AstrBot's original model.
+        if selected_provider is None:
             logger.warning(
-                "路由模型 '%s' 请求失败，将继续使用 AstrBot 原模型。"
-                "错误类型：%s，错误：%s",
+                "路由模型 '%s' 对应的 AstrBot 提供商 '%s' 不存在，"
+                "将继续使用 AstrBot 原聊天模型。",
                 route_match.route_entry.name,
-                type(error).__name__,
-                error,
+                route_match.route_entry.provider_id,
             )
             return
 
-        response_text = str(getattr(routed_response, "completion_text", "")).strip()
-        if not response_text:
-            logger.warning(
-                "路由模型 '%s' 返回空内容，将继续使用 AstrBot 原模型。",
-                route_match.route_entry.name,
-            )
-            return
-
-        try:
-            await event.send(event.plain_result(response_text))
-        except Exception as error:  # noqa: BLE001 - A send failure must fail open.
-            logger.warning(
-                "路由结果发送失败，将继续使用 AstrBot 原模型。错误类型：%s，错误：%s",
-                type(error).__name__,
-                error,
-            )
-            return
-
-        event.stop_event()
-        await self._persist_conversation_pair(event, message_text, response_text)
+        event.set_extra(
+            SELECTED_PROVIDER_EXTRA_KEY,
+            route_match.route_entry.provider_id,
+        )
+        event.set_extra(ROUTE_MATCH_EXTRA_KEY, route_match)
         logger.info(
-            "消息已路由至 '%s'，判断方式=%s，命中项=%s。",
+            "已为消息选择路由聊天模型 '%s'，判断方式=%s，命中项=%s；"
+            "后续 Agent、媒体处理、fallback 与发送流程交由 AstrBot。",
             route_match.route_entry.name,
             route_match.judgement_method,
             route_match.matched_value,
+        )
+
+    @filter.on_llm_request()
+    async def apply_route_request(
+        self,
+        event: AstrMessageEvent,
+        request: ProviderRequest,
+    ) -> None:
+        route_match = event.get_extra(ROUTE_MATCH_EXTRA_KEY)
+        if not isinstance(route_match, RouteMatch):
+            return
+
+        request.system_prompt = await self._resolve_route_system_prompt(
+            route_match.route_entry,
+            request.system_prompt,
+        )
+        supported_modalities = self._get_provider_modalities(
+            route_match.route_entry.provider_id
+        )
+        request.contexts = sanitize_contexts_for_modalities(
+            list(request.contexts or []),
+            supported_modalities=supported_modalities,
         )
 
     async def _find_llm_match(
@@ -346,12 +334,37 @@ class LLMRouterPlugin(Star):
             return str(persona.get("prompt", "")).strip()
         return str(getattr(persona, "system_prompt", "")).strip()
 
-    @staticmethod
-    def _get_message_text(event: AstrMessageEvent, request: ProviderRequest) -> str:
-        request_prompt = getattr(request, "prompt", None)
-        if request_prompt is not None and str(request_prompt).strip():
-            return str(request_prompt).strip()
-        return str(getattr(event, "message_str", "")).strip()
+    def _get_provider_modalities(self, provider_id: str) -> frozenset[str] | None:
+        provider = self.context.get_provider_by_id(provider_id)
+        if provider is None:
+            return frozenset()
+
+        provider_config = getattr(provider, "provider_config", {})
+        configured_modalities = provider_config.get("modalities")
+        if isinstance(configured_modalities, list) and configured_modalities:
+            return frozenset(
+                str(modality).strip().casefold()
+                for modality in configured_modalities
+                if str(modality).strip()
+            )
+
+        model_metadata = provider_config.get("model_metadata")
+        if isinstance(model_metadata, dict):
+            metadata_modalities = model_metadata.get("modalities")
+            if isinstance(metadata_modalities, dict):
+                metadata_inputs = metadata_modalities.get("input")
+                if isinstance(metadata_inputs, list) and metadata_inputs:
+                    return frozenset(
+                        str(modality).strip().casefold()
+                        for modality in metadata_inputs
+                        if str(modality).strip()
+                    )
+
+        if configured_modalities == []:
+            return None
+        if not isinstance(configured_modalities, list):
+            return frozenset()
+        return None
 
     @staticmethod
     def _build_identity_context(event: AstrMessageEvent) -> IdentityContext:
@@ -375,30 +388,3 @@ class LLMRouterPlugin(Star):
             return str(method() or "")
         except Exception:  # noqa: BLE001 - Platform adapters may raise arbitrary errors.
             return ""
-
-    async def _persist_conversation_pair(
-        self,
-        event: AstrMessageEvent,
-        user_text: str,
-        assistant_text: str,
-    ) -> None:
-        try:
-            conversation_manager = self.context.conversation_manager
-            conversation_id = await conversation_manager.get_curr_conversation_id(
-                event.unified_msg_origin
-            )
-            if not conversation_id:
-                return
-            await conversation_manager.add_message_pair(
-                cid=conversation_id,
-                user_message=UserMessageSegment(content=[TextPart(text=user_text)]),
-                assistant_message=AssistantMessageSegment(
-                    content=[TextPart(text=assistant_text)]
-                ),
-            )
-        except Exception as error:  # noqa: BLE001 - History persistence is best-effort.
-            logger.warning(
-                "路由回复已发送，但写入 AstrBot 会话历史失败。错误类型：%s，错误：%s",
-                type(error).__name__,
-                error,
-            )

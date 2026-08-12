@@ -17,6 +17,7 @@ from router_core import (
     parse_classification_route_id,
     parse_judgement_methods,
     parse_route_entries,
+    sanitize_contexts_for_modalities,
 )
 
 
@@ -360,6 +361,90 @@ class DirectRoutingTests(unittest.TestCase):
         self.assertIsNotNone(route_match)
         assert route_match is not None
         self.assertEqual(route_match.route_entry.name, "second high")
+
+
+class ContextModalitySanitizationTests(unittest.TestCase):
+    def test_text_provider_removes_image_audio_and_video_blocks(self) -> None:
+        contexts = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "keep"},
+                    {"type": "image_url", "image_url": {"url": "image"}},
+                    {"type": "input_audio", "input_audio": {"data": "audio"}},
+                    {"type": "video_url", "video_url": {"url": "video"}},
+                ],
+            }
+        ]
+
+        sanitized_contexts = sanitize_contexts_for_modalities(
+            contexts,
+            supported_modalities=frozenset({"text"}),
+        )
+
+        self.assertEqual(
+            sanitized_contexts[0]["content"],
+            [{"type": "text", "text": "keep"}],
+        )
+
+    def test_supported_media_and_unknown_parts_are_preserved(self) -> None:
+        contexts = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": "image"}},
+                    {"type": "custom_context", "value": "keep unknown"},
+                ],
+            }
+        ]
+
+        sanitized_contexts = sanitize_contexts_for_modalities(
+            contexts,
+            supported_modalities=frozenset({"text", "image"}),
+        )
+
+        self.assertEqual(sanitized_contexts, contexts)
+
+    def test_unconfigured_modalities_preserve_everything(self) -> None:
+        contexts = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": "image"}},
+                ],
+            }
+        ]
+
+        sanitized_contexts = sanitize_contexts_for_modalities(
+            contexts,
+            supported_modalities=None,
+        )
+
+        self.assertEqual(sanitized_contexts, contexts)
+        self.assertIsNot(sanitized_contexts, contexts)
+
+    def test_image_only_message_is_removed_but_tool_payload_is_preserved(self) -> None:
+        contexts = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": "image"}},
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": [],
+                "tool_calls": [{"id": "tool-1"}],
+            },
+        ]
+
+        sanitized_contexts = sanitize_contexts_for_modalities(
+            contexts,
+            supported_modalities=frozenset({"text"}),
+        )
+
+        self.assertEqual(len(sanitized_contexts), 1)
+        self.assertEqual(sanitized_contexts[0]["tool_calls"][0]["id"], "tool-1")
 
 
 class RouteParsingTests(unittest.TestCase):
